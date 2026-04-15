@@ -1,23 +1,50 @@
 """
-Billing Module router stub.
+Billing Module – FastAPI route handlers.
 
-Owned by: Billing Module developer.
-Base path: /api/v1/billing
+Base path (registered in main.py): /api/v1/billing
 
-Planned endpoints (implement per billing_implementation.md):
-    POST  /api/v1/billing/transactions
-    GET   /api/v1/billing/transactions
-    GET   /api/v1/billing/transactions/{transaction_id}
+Endpoints:
+    POST  /transactions  – create a billing transaction (idempotent)
 
-Key rules:
-    - Billing is strictly atomic.
-    - Every create request must include idempotency_key.
-    - Same key + same payload  -> return original result (idempotent replay).
-    - Same key + diff payload  -> return 409 IDEMPOTENCY_KEY_CONFLICT.
+Routes are intentionally thin: all business logic is in service.py.
 """
 
-from fastapi import APIRouter
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, Depends
+
+from app.common.auth import AuthenticatedUser, require_auth
+from app.common.responses import success_response
+from app.modules.billing import service
+from app.modules.billing.schemas import TransactionCreateRequest
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# TODO: implement billing endpoints per billing_implementation.md and api_contracts.md
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/billing/transactions
+# ---------------------------------------------------------------------------
+
+@router.post("/transactions", status_code=201)
+async def create_transaction(
+    payload: TransactionCreateRequest,
+    user: AuthenticatedUser = Depends(require_auth),
+):
+    """
+    Create a billing transaction.
+
+    - Validates stock for all items atomically (fail-fast, no partial writes).
+    - Deducts stock and records audit trail inside a single Firestore transaction.
+    - Idempotent: replaying the same idempotency_key + payload returns the
+      original response (HTTP 200). A conflicting payload raises HTTP 409.
+    """
+    transaction, status_code = await service.create_transaction(
+        payload=payload,
+        store_id=user.store_id,
+        user_id=user.user_id,
+    )
+    return success_response({"transaction": transaction}, status_code=status_code)
