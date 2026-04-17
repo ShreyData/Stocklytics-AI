@@ -1,7 +1,7 @@
 """
 RetailMind AI – FastAPI application entry point.
 
-Architecture: modular monolith (see Plan/architecture_overview.md)
+Architecture: modular monolith (see Planning/markdowns-20260417T134608Z-3-001/markdowns/architecture_overview.md)
 Base API path: /api/v1
 
 Startup sequence:
