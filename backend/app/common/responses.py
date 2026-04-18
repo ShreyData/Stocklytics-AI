@@ -7,6 +7,7 @@ produce the same envelope shape without duplicating code.
 
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from app.common.logging_config import request_id_ctx_var
@@ -33,4 +34,4 @@ def success_response(
     """
     request_id = request_id_ctx_var.get("-")
     body = {"request_id": request_id, **data}
-    return JSONResponse(status_code=status_code, content=body)
+    return JSONResponse(status_code=status_code, content=jsonable_encoder(body))
