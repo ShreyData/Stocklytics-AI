@@ -71,6 +71,10 @@ class CustomerRepository:
         results = []
         for doc in docs:
             data = doc.to_dict()
-            data["transaction_id"] = doc.id
-            results.append(data)
+            mapped_data = {
+                "transaction_id": doc.id,
+                "total_amount": data.get("total_amount", 0.0),
+                "sale_timestamp": data.get("sale_timestamp")
+            }
+            results.append(mapped_data)
         return results
