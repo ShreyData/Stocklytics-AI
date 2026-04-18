@@ -1,5 +1,0 @@
-- [x] Implement `schemas.py` for request and response validation
-- [x] Implement `repository.py` for Firestore operations
-- [x] Implement `service.py` for business logic and validation
-- [x] Implement `router.py` endpoints
-- [x] Verify functionality
