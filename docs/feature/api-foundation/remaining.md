@@ -16,7 +16,7 @@ While the framework and API responses are fully configured, the real connection 
 ## When to Implement (Per Project Workflow)
 
 ### 1. Merge API Foundation
-According to `Plan/github_workflow_for_team.pdf` (**Merge Order**) and the `implementation_roadmap.md`, the current `feature/api-foundation` branch successfully completes Exit Criteria 1 and 2:
+According to `Plan/github_workflow_for_team.md` (**Merge Order**) and the `implementation_roadmap.md`, the current `feature/api-foundation` branch successfully completes Exit Criteria 1 and 2:
 > * Health and readiness endpoints work
 > * Authenticated requests reach module routers
 
