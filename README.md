@@ -10,5 +10,4 @@ Modular monolith backend with a lightweight frontend for small retail stores.
 - `scripts/` Local tooling and helpers
 
 ## Notes
-- Plan docs live in the `Plan/` folder and are ignored by Git.
-- The customer flow integration reference is documented in `docs/customer/customer-module-system-map.md`.
+- Planning docs live in the Plan folder and are ignored by Git.
