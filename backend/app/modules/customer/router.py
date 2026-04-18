@@ -22,7 +22,7 @@ async def create_customer(
     user: AuthenticatedUser = Depends(require_auth),
 ):
     if req.store_id != user.store_id:
-        req.store_id = user.store_id  # Force the auth token's store_id
+        raise ForbiddenError("Store ID mismatch")
         
     customer = await customer_service.create_customer(req)
     return success_response({"customer": customer}, status_code=201)
