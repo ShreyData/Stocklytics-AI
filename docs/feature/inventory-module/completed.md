@@ -30,7 +30,7 @@ The Inventory Module is the **single source of truth for product stock levels** 
 | `GET` | `/api/v1/inventory/products` | 200 | List products with optional filters |
 | `GET` | `/api/v1/inventory/products/{product_id}` | 200 / 404 | Get a single product |
 | `PATCH` | `/api/v1/inventory/products/{product_id}` | 200 | Partially update a product |
-| `POST` | `/api/v1/inventory/products/{product_id}/stock-adjustments` | 201 | Record a stock change |
+| `POST` | `/api/v1/inventory/products/{product_id}/stock-adjustments` | 200 | Record a stock change |
 
 All endpoints require a valid Firebase Bearer token. Responses always include `request_id`.
 
@@ -48,10 +48,10 @@ Append-only audit log. Every stock change appends one record. Key fields: `adjus
 
 ## Business Rules Enforced
 
-- **Stock never goes negative** — `apply_stock_adjustment()` computes the resulting quantity and raises `400 INVALID_REQUEST` before any Firestore write if it would go below zero.
+- **Stock never goes negative** — `apply_stock_adjustment()` validates inside the stock transaction and raises `400 INVALID_REQUEST` when resulting quantity would go below zero.
 - **Expiry status is always computed** — `compute_expiry_status()` in `service.py` derives `EXPIRED`, `EXPIRING_SOON` (within 7 days), or `OK` from the UTC clock on every create and update. Callers cannot override it.
-- **Store scoping** — every product query is filtered by `store_id` extracted from the Firebase Auth token. A product belonging to a different store returns `404` to prevent cross-tenant data leakage.
-- **Immutable audit trail** — every stock adjustment writes a record to `stock_adjustments`. The collection is append-only; records are never modified or deleted.
+- **Store scoping** — write payloads include `store_id` and must match the authenticated token scope.
+- **Immutable audit trail** — every stock adjustment writes a record to `stock_adjustments` in the same transaction as the product stock update.
 - **Partial updates** — `PATCH` uses Pydantic `model_fields_set` to update only the exact fields the caller explicitly sent. Unset fields are not touched.
 - **Adjustment types** — four supported types: `ADD`, `REMOVE`, `SALE_DEDUCTION`, `MANUAL_CORRECTION`. `REMOVE` and `SALE_DEDUCTION` decrease stock; `ADD` and `MANUAL_CORRECTION` increase it.
 
@@ -72,6 +72,8 @@ Append-only audit log. Every stock change appends one record. Key fields: `adjus
 |-----------|------|-----------|
 | `low_stock_only` | `bool` (default: `false`) | Returns only products where `quantity_on_hand <= reorder_threshold` |
 | `expiry_before` | ISO-8601 datetime (optional) | Returns only products whose `expiry_date` is before the given value |
+| `limit` | `int` (default: `50`) | Maximum items per page |
+| `page_token` | `string` (optional) | Numeric continuation token for next page |
 
 ---
 
@@ -83,4 +85,4 @@ Append-only audit log. Every stock change appends one record. Key fields: `adjus
 | `TestNegativeStockPrevention` | `REMOVE` exceeding stock → 400, `SALE_DEDUCTION` exceeding stock → 400, exact depletion to 0 succeeds, `ADD` always succeeds, non-existent product → 404, invalid `adjustment_type` → 400 |
 | `TestUpdateProduct` | 200 with updated fields, `request_id` present, name updated correctly, ghost product → 404, auth guard → 401, invalid `status` → 400, deactivation succeeds |
 
-**Result: 19 / 19 tests passing.**
+**Result: inventory tests updated for contract alignment (20 scenarios defined).**

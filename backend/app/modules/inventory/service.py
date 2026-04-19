@@ -25,8 +25,6 @@ from app.modules.inventory.schemas import (
     EXPIRY_STATUS_EXPIRED,
     EXPIRY_STATUS_EXPIRING_SOON,
     EXPIRY_STATUS_OK,
-    ADJUSTMENT_TYPE_REMOVE,
-    ADJUSTMENT_TYPE_SALE_DEDUCTION,
     ProductCreateRequest,
     ProductUpdateRequest,
     StockAdjustmentRequest,
@@ -108,6 +106,8 @@ async def create_product(
         2. Build the Firestore document.
         3. Persist and return the serialised product.
     """
+    _validate_store_scope(payload.store_id, store_id)
+
     product_id = f"prod_{uuid.uuid4().hex}"
     now = datetime.now(timezone.utc)
 
@@ -119,7 +119,7 @@ async def create_product(
         "name": payload.name,
         "category": payload.category,
         "price": payload.price,
-        "quantity_on_hand": payload.quantity_on_hand,
+        "quantity_on_hand": payload.quantity,
         "reorder_threshold": payload.reorder_threshold,
         "expiry_date": payload.expiry_date,
         "expiry_status": expiry_status,
@@ -134,9 +134,12 @@ async def create_product(
 
 async def list_products(
     store_id: str,
+    requested_store_id: Optional[str] = None,
+    limit: int = 50,
+    page_token: Optional[str] = None,
     low_stock_only: bool = False,
     expiry_before: Optional[datetime] = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """
     Retrieve products for a store with optional filters.
 
@@ -145,12 +148,24 @@ async def list_products(
         low_stock_only: Only return products at or below their reorder threshold.
         expiry_before: Only return products whose expiry_date is before this value.
     """
+    _validate_store_scope(requested_store_id, store_id, allow_none=True)
+
     products = await repository.list_products(
         store_id=store_id,
         low_stock_only=low_stock_only,
         expiry_before=expiry_before,
     )
-    return [_firestore_to_response(p) for p in products]
+    start_idx = _parse_page_token(page_token)
+    if start_idx >= len(products):
+        return {"items": [], "next_page_token": None}
+
+    page = products[start_idx:start_idx + limit]
+    next_idx = start_idx + limit
+    next_page_token = str(next_idx) if next_idx < len(products) else None
+    return {
+        "items": [_firestore_to_response(product) for product in page],
+        "next_page_token": next_page_token,
+    }
 
 
 async def get_product(product_id: str, store_id: str) -> dict[str, Any]:
@@ -183,6 +198,8 @@ async def update_product(
         3. Recompute expiry_status if relevant fields changed.
         4. Persist and return the updated product.
     """
+    _validate_store_scope(payload.store_id, store_id)
+
     existing = await repository.get_product_by_id(product_id)
     if existing is None or existing.get("store_id") != store_id:
         raise NotFoundError(
@@ -243,55 +260,13 @@ async def apply_stock_adjustment(
         5. Insert an immutable stock_adjustments audit record.
         6. Return the adjustment record.
 
-    Business rule: REMOVE and SALE_DEDUCTION decrease stock; ADD increases it.
-    MANUAL_CORRECTION can go either way but is always stored as a positive
-    quantity_delta; the caller signals direction via adjustment_type.
+    Business rule: REMOVE and SALE_DEDUCTION decrease stock.
+    ADD and MANUAL_CORRECTION increase stock.
     """
-    product = await repository.get_product_by_id(product_id)
-    if product is None or product.get("store_id") != store_id:
-        raise NotFoundError(
-            f"Product '{product_id}' not found.",
-            details={"product_id": product_id},
-        )
+    _validate_store_scope(payload.store_id, store_id)
 
-    current_quantity: int = product.get("quantity_on_hand", 0)
     delta = payload.quantity_delta
-
-    # Determine whether this adjustment adds or subtracts stock
-    is_subtraction = payload.adjustment_type in {
-        ADJUSTMENT_TYPE_REMOVE,
-        ADJUSTMENT_TYPE_SALE_DEDUCTION,
-    }
-
-    if is_subtraction:
-        new_quantity = current_quantity - delta
-    else:
-        new_quantity = current_quantity + delta
-
-    # Business rule: stock must NEVER go negative
-    if new_quantity < 0:
-        raise AppValidationError(
-            "Stock adjustment would result in negative stock, which is not allowed.",
-            details={
-                "current_quantity": current_quantity,
-                "requested_delta": delta,
-                "adjustment_type": payload.adjustment_type,
-                "resulting_quantity": new_quantity,
-            },
-        )
-
     now = datetime.now(timezone.utc)
-
-    # Persist the updated stock level
-    await repository.update_product(
-        product_id,
-        {
-            "quantity_on_hand": new_quantity,
-            "updated_at": now,
-        },
-    )
-
-    # Create the immutable audit record
     adjustment_id = f"adj_{uuid.uuid4().hex}"
     adjustment_doc: dict[str, Any] = {
         "adjustment_id": adjustment_id,
@@ -305,9 +280,30 @@ async def apply_stock_adjustment(
         "created_at": now,
     }
 
-    stored_adjustment = await repository.create_stock_adjustment(
-        adjustment_id, adjustment_doc
-    )
+    try:
+        updated_at, new_quantity = await repository.apply_stock_adjustment_atomic(
+            product_id=product_id,
+            store_id=store_id,
+            adjustment_type=payload.adjustment_type,
+            quantity_delta=delta,
+            adjustment_doc=adjustment_doc,
+            updated_at=now,
+        )
+    except repository.NegativeStockError as exc:
+        raise AppValidationError(
+            "Stock adjustment would result in negative stock, which is not allowed.",
+            details={
+                "current_quantity": exc.current_quantity,
+                "requested_delta": exc.requested_delta,
+                "adjustment_type": exc.adjustment_type,
+                "resulting_quantity": exc.resulting_quantity,
+            },
+        ) from exc
+    except repository.ProductNotFoundError as exc:
+        raise NotFoundError(
+            f"Product '{product_id}' not found.",
+            details={"product_id": exc.product_id},
+        ) from exc
 
     logger.info(
         "Stock adjustment applied",
@@ -315,9 +311,40 @@ async def apply_stock_adjustment(
             "product_id": product_id,
             "adjustment_type": payload.adjustment_type,
             "delta": delta,
-            "old_quantity": current_quantity,
             "new_quantity": new_quantity,
         },
     )
+    return {
+        "product_id": product_id,
+        "new_quantity_on_hand": new_quantity,
+        "adjustment_id": adjustment_id,
+        "updated_at": updated_at.isoformat(),
+    }
 
-    return _firestore_to_response(stored_adjustment)
+
+def _validate_store_scope(
+    request_store_id: Optional[str],
+    auth_store_id: str,
+    allow_none: bool = False,
+) -> None:
+    if request_store_id is None and allow_none:
+        return
+    if request_store_id != auth_store_id:
+        raise AppValidationError(
+            "store_id in request must match authenticated store scope.",
+            details={
+                "request_store_id": request_store_id,
+                "auth_store_id": auth_store_id,
+            },
+        )
+
+
+def _parse_page_token(page_token: Optional[str]) -> int:
+    if page_token is None:
+        return 0
+    if not page_token.isdigit():
+        raise AppValidationError(
+            "Invalid page_token. Expected a numeric token.",
+            details={"page_token": page_token},
+        )
+    return int(page_token)
