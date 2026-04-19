@@ -15,19 +15,19 @@ Run with:
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.modules.inventory import repository
 
 client = TestClient(app, raise_server_exceptions=False)
 
 AUTH_HEADER = {"Authorization": "Bearer dev-token"}
+STORE_ID = "store_001"
 
 # ---------------------------------------------------------------------------
 # Shared test helpers
@@ -38,7 +38,7 @@ FAKE_NOW = datetime(2026, 4, 15, 12, 0, 0, tzinfo=timezone.utc)
 
 SAMPLE_PRODUCT: dict[str, Any] = {
     "product_id": FAKE_PRODUCT_ID,
-    "store_id": "store_001",
+    "store_id": STORE_ID,
     "name": "Test Widget",
     "category": "Widgets",
     "price": 9.99,
@@ -53,7 +53,7 @@ SAMPLE_PRODUCT: dict[str, Any] = {
 
 SAMPLE_ADJUSTMENT: dict[str, Any] = {
     "adjustment_id": "adj_def456",
-    "store_id": "store_001",
+    "store_id": STORE_ID,
     "product_id": FAKE_PRODUCT_ID,
     "adjustment_type": "ADD",
     "quantity_delta": 20,
@@ -90,10 +90,11 @@ class TestCreateProduct:
             response = client.post(
                 "/api/v1/inventory/products",
                 json={
+                    "store_id": STORE_ID,
                     "name": "Test Widget",
                     "category": "Widgets",
                     "price": 9.99,
-                    "quantity_on_hand": 50,
+                    "quantity": 50,
                     "reorder_threshold": 10,
                 },
                 headers=AUTH_HEADER,
@@ -110,10 +111,11 @@ class TestCreateProduct:
             response = client.post(
                 "/api/v1/inventory/products",
                 json={
+                    "store_id": STORE_ID,
                     "name": "Test Widget",
                     "category": "Widgets",
                     "price": 9.99,
-                    "quantity_on_hand": 50,
+                    "quantity": 50,
                     "reorder_threshold": 10,
                 },
                 headers=AUTH_HEADER,
@@ -131,10 +133,11 @@ class TestCreateProduct:
             response = client.post(
                 "/api/v1/inventory/products",
                 json={
+                    "store_id": STORE_ID,
                     "name": "Test Widget",
                     "category": "Widgets",
                     "price": 9.99,
-                    "quantity_on_hand": 50,
+                    "quantity": 50,
                     "reorder_threshold": 10,
                 },
                 headers=AUTH_HEADER,
@@ -151,10 +154,11 @@ class TestCreateProduct:
         response = client.post(
             "/api/v1/inventory/products",
             json={
+                "store_id": STORE_ID,
                 "name": "Test Widget",
                 "category": "Widgets",
                 "price": 9.99,
-                "quantity_on_hand": 50,
+                "quantity": 50,
                 "reorder_threshold": 10,
             },
         )
@@ -172,14 +176,15 @@ class TestCreateProduct:
         assert_error_shape(response.json())
 
     def test_create_product_rejects_negative_quantity(self):
-        """Negative quantity_on_hand must fail Pydantic validation (400)."""
+        """Negative quantity must fail Pydantic validation (400)."""
         response = client.post(
             "/api/v1/inventory/products",
             json={
+                "store_id": STORE_ID,
                 "name": "Bad Widget",
                 "category": "Widgets",
                 "price": 5.0,
-                "quantity_on_hand": -1,
+                "quantity": -1,
                 "reorder_threshold": 0,
             },
             headers=AUTH_HEADER,
@@ -197,10 +202,11 @@ class TestCreateProduct:
             response = client.post(
                 "/api/v1/inventory/products",
                 json={
+                    "store_id": STORE_ID,
                     "name": "No Expiry Widget",
                     "category": "Widgets",
                     "price": 1.0,
-                    "quantity_on_hand": 100,
+                    "quantity": 100,
                     "reorder_threshold": 5,
                 },
                 headers=AUTH_HEADER,
@@ -216,22 +222,25 @@ class TestCreateProduct:
 class TestNegativeStockPrevention:
     """POST /api/v1/inventory/products/{id}/stock-adjustments – stock guard."""
 
-    def _existing_product(self, quantity: int = 5) -> dict[str, Any]:
-        return {**SAMPLE_PRODUCT, "quantity_on_hand": quantity}
-
     def test_remove_more_than_stock_returns_400(self):
         """
         Removing more units than available must return 400 with
         INVALID_REQUEST error code – stock must never go negative.
         """
         with patch(
-            "app.modules.inventory.service.repository.get_product_by_id",
+            "app.modules.inventory.service.repository.apply_stock_adjustment_atomic",
             new_callable=AsyncMock,
-            return_value=self._existing_product(quantity=5),
+            side_effect=repository.NegativeStockError(
+                current_quantity=5,
+                requested_delta=10,
+                adjustment_type="REMOVE",
+                resulting_quantity=-5,
+            ),
         ):
             response = client.post(
                 f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}/stock-adjustments",
                 json={
+                    "store_id": STORE_ID,
                     "adjustment_type": "REMOVE",
                     "quantity_delta": 10,   # 10 > 5 available → must reject
                     "reason": "Manual removal attempt",
@@ -246,13 +255,19 @@ class TestNegativeStockPrevention:
     def test_sale_deduction_exceeding_stock_returns_400(self):
         """SALE_DEDUCTION that results in negative stock must be rejected."""
         with patch(
-            "app.modules.inventory.service.repository.get_product_by_id",
+            "app.modules.inventory.service.repository.apply_stock_adjustment_atomic",
             new_callable=AsyncMock,
-            return_value=self._existing_product(quantity=3),
+            side_effect=repository.NegativeStockError(
+                current_quantity=3,
+                requested_delta=5,
+                adjustment_type="SALE_DEDUCTION",
+                resulting_quantity=-2,
+            ),
         ):
             response = client.post(
                 f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}/stock-adjustments",
                 json={
+                    "store_id": STORE_ID,
                     "adjustment_type": "SALE_DEDUCTION",
                     "quantity_delta": 5,  # 5 > 3 → must reject
                     "reason": "Point-of-sale deduction",
@@ -264,75 +279,53 @@ class TestNegativeStockPrevention:
 
     def test_exact_stock_removal_is_allowed(self):
         """Removing exactly the available quantity (resulting in 0) must succeed."""
-        updated_product = {**SAMPLE_PRODUCT, "quantity_on_hand": 0}
-        with (
-            patch(
-                "app.modules.inventory.service.repository.get_product_by_id",
-                new_callable=AsyncMock,
-                return_value=self._existing_product(quantity=10),
-            ),
-            patch(
-                "app.modules.inventory.service.repository.update_product",
-                new_callable=AsyncMock,
-                return_value=updated_product,
-            ),
-            patch(
-                "app.modules.inventory.service.repository.create_stock_adjustment",
-                new_callable=AsyncMock,
-                return_value={**SAMPLE_ADJUSTMENT, "adjustment_type": "REMOVE", "quantity_delta": 10},
-            ),
+        with patch(
+            "app.modules.inventory.service.repository.apply_stock_adjustment_atomic",
+            new_callable=AsyncMock,
+            return_value=(FAKE_NOW, 0),
         ):
             response = client.post(
                 f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}/stock-adjustments",
                 json={
+                    "store_id": STORE_ID,
                     "adjustment_type": "REMOVE",
                     "quantity_delta": 10,
                     "reason": "Full clearance",
                 },
                 headers=AUTH_HEADER,
             )
-        assert response.status_code == 201
+        assert response.status_code == 200
 
     def test_add_adjustment_always_succeeds(self):
         """ADD adjustments must always succeed regardless of current stock."""
-        with (
-            patch(
-                "app.modules.inventory.service.repository.get_product_by_id",
-                new_callable=AsyncMock,
-                return_value=self._existing_product(quantity=0),
-            ),
-            patch(
-                "app.modules.inventory.service.repository.update_product",
-                new_callable=AsyncMock,
-                return_value={**SAMPLE_PRODUCT, "quantity_on_hand": 20},
-            ),
-            patch(
-                "app.modules.inventory.service.repository.create_stock_adjustment",
-                new_callable=AsyncMock,
-                return_value=SAMPLE_ADJUSTMENT,
-            ),
+        with patch(
+            "app.modules.inventory.service.repository.apply_stock_adjustment_atomic",
+            new_callable=AsyncMock,
+            return_value=(FAKE_NOW, 20),
         ):
             response = client.post(
                 f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}/stock-adjustments",
                 json={
+                    "store_id": STORE_ID,
                     "adjustment_type": "ADD",
                     "quantity_delta": 20,
                     "reason": "New delivery",
                 },
                 headers=AUTH_HEADER,
             )
-        assert response.status_code == 201
+        assert response.status_code == 200
 
     def test_adjustment_on_nonexistent_product_returns_404(self):
         """Adjustments against a non-existent product must return 404."""
         with patch(
-            "app.modules.inventory.service.repository.get_product_by_id",
+            "app.modules.inventory.service.repository.apply_stock_adjustment_atomic",
             new_callable=AsyncMock,
-            return_value=None,
+            side_effect=repository.ProductNotFoundError("nonexistent_prod"),
         ):
             response = client.post(
                 "/api/v1/inventory/products/nonexistent_prod/stock-adjustments",
                 json={
+                    "store_id": STORE_ID,
                     "adjustment_type": "ADD",
                     "quantity_delta": 5,
                     "reason": "Ghost product",
@@ -347,6 +340,7 @@ class TestNegativeStockPrevention:
         response = client.post(
             f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}/stock-adjustments",
             json={
+                "store_id": STORE_ID,
                 "adjustment_type": "TELEPORT",
                 "quantity_delta": 5,
                 "reason": "Test",
@@ -380,7 +374,7 @@ class TestUpdateProduct:
         ):
             response = client.patch(
                 f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}",
-                json={"name": "Updated Widget", "price": 19.99},
+                json={"store_id": STORE_ID, "name": "Updated Widget", "price": 19.99},
                 headers=AUTH_HEADER,
             )
         assert response.status_code == 200
@@ -402,7 +396,7 @@ class TestUpdateProduct:
         ):
             response = client.patch(
                 f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}",
-                json={"name": "Updated Widget"},
+                json={"store_id": STORE_ID, "name": "Updated Widget"},
                 headers=AUTH_HEADER,
             )
         assert "request_id" in response.json()
@@ -424,7 +418,7 @@ class TestUpdateProduct:
         ):
             response = client.patch(
                 f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}",
-                json={"name": "Renamed Widget"},
+                json={"store_id": STORE_ID, "name": "Renamed Widget"},
                 headers=AUTH_HEADER,
             )
         assert response.json()["product"]["name"] == "Renamed Widget"
@@ -438,7 +432,7 @@ class TestUpdateProduct:
         ):
             response = client.patch(
                 "/api/v1/inventory/products/ghost_prod",
-                json={"name": "Ghost"},
+                json={"store_id": STORE_ID, "name": "Ghost"},
                 headers=AUTH_HEADER,
             )
         assert response.status_code == 404
@@ -448,7 +442,7 @@ class TestUpdateProduct:
         """PATCH without token must return 401."""
         response = client.patch(
             f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}",
-            json={"name": "No Auth Widget"},
+            json={"store_id": STORE_ID, "name": "No Auth Widget"},
         )
         assert response.status_code == 401
 
@@ -456,7 +450,7 @@ class TestUpdateProduct:
         """An unrecognised status value must fail Pydantic validation."""
         response = client.patch(
             f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}",
-            json={"status": "DELETED"},
+            json={"store_id": STORE_ID, "status": "DELETED"},
             headers=AUTH_HEADER,
         )
         assert response.status_code == 400
@@ -478,7 +472,7 @@ class TestUpdateProduct:
         ):
             response = client.patch(
                 f"/api/v1/inventory/products/{FAKE_PRODUCT_ID}",
-                json={"status": "INACTIVE"},
+                json={"store_id": STORE_ID, "status": "INACTIVE"},
                 headers=AUTH_HEADER,
             )
         assert response.status_code == 200

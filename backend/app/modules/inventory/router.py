@@ -56,6 +56,9 @@ async def create_product(
 
 @router.get("/products", status_code=200)
 async def list_products(
+    store_id: Optional[str] = Query(default=None, description="Store scope. Must match authenticated store_id when provided."),
+    limit: int = Query(default=50, ge=1, le=200, description="Maximum items to return in one response."),
+    page_token: Optional[str] = Query(default=None, description="Opaque pagination token from previous response."),
     low_stock_only: bool = Query(default=False, description="Only return products at or below reorder threshold."),
     expiry_before: Optional[datetime] = Query(default=None, description="Only return products expiring before this ISO-8601 datetime."),
     user: AuthenticatedUser = Depends(require_auth),
@@ -69,10 +72,13 @@ async def list_products(
     """
     products = await service.list_products(
         store_id=user.store_id,
+        requested_store_id=store_id,
+        limit=limit,
+        page_token=page_token,
         low_stock_only=low_stock_only,
         expiry_before=expiry_before,
     )
-    return success_response({"products": products, "total": len(products)})
+    return success_response(products)
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +120,7 @@ async def update_product(
 # POST /api/v1/inventory/products/{product_id}/stock-adjustments
 # ---------------------------------------------------------------------------
 
-@router.post("/products/{product_id}/stock-adjustments", status_code=201)
+@router.post("/products/{product_id}/stock-adjustments", status_code=200)
 async def create_stock_adjustment(
     product_id: str,
     payload: StockAdjustmentRequest,
@@ -126,10 +132,10 @@ async def create_stock_adjustment(
     Validates that the resulting quantity never drops below zero.
     Creates an immutable audit record in stock_adjustments.
     """
-    adjustment = await service.apply_stock_adjustment(
+    result = await service.apply_stock_adjustment(
         product_id=product_id,
         payload=payload,
         store_id=user.store_id,
         user_id=user.user_id,
     )
-    return success_response({"adjustment": adjustment}, status_code=201)
+    return success_response(result, status_code=200)

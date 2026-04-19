@@ -46,10 +46,11 @@ VALID_PRODUCT_STATUSES = {PRODUCT_STATUS_ACTIVE, PRODUCT_STATUS_INACTIVE}
 class ProductCreateRequest(BaseModel):
     """Payload for POST /api/v1/inventory/products."""
 
+    store_id: str = Field(..., min_length=1, max_length=100)
     name: str = Field(..., min_length=1, max_length=200)
     category: str = Field(..., min_length=1, max_length=100)
     price: float = Field(..., ge=0)
-    quantity_on_hand: int = Field(..., ge=0)
+    quantity: int = Field(..., ge=0)
     reorder_threshold: int = Field(..., ge=0)
     expiry_date: Optional[datetime] = Field(default=None)
     status: str = Field(default=PRODUCT_STATUS_ACTIVE)
@@ -68,6 +69,7 @@ class ProductUpdateRequest(BaseModel):
     All fields are optional; only provided fields are updated.
     """
 
+    store_id: str = Field(..., min_length=1, max_length=100)
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     category: Optional[str] = Field(default=None, min_length=1, max_length=100)
     price: Optional[float] = Field(default=None, ge=0)
@@ -107,6 +109,7 @@ class ProductResponse(BaseModel):
 class StockAdjustmentRequest(BaseModel):
     """Payload for POST /api/v1/inventory/products/{product_id}/stock-adjustments."""
 
+    store_id: str = Field(..., min_length=1, max_length=100)
     adjustment_type: str
     quantity_delta: int = Field(..., ge=1, description="Positive integer representing the magnitude of change.")
     reason: str = Field(..., min_length=1, max_length=500)
