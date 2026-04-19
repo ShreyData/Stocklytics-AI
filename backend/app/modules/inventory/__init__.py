@@ -1,1 +1,3 @@
-# Inventory module
+"""
+Inventory Module – package marker.
+"""
