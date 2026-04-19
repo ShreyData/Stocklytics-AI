@@ -21,6 +21,31 @@ from app.common.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+
+class NegativeStockError(Exception):
+    """Raised when an adjustment would reduce stock below zero."""
+
+    def __init__(
+        self,
+        current_quantity: int,
+        requested_delta: int,
+        adjustment_type: str,
+        resulting_quantity: int,
+    ) -> None:
+        super().__init__("Negative stock is not allowed.")
+        self.current_quantity = current_quantity
+        self.requested_delta = requested_delta
+        self.adjustment_type = adjustment_type
+        self.resulting_quantity = resulting_quantity
+
+
+class ProductNotFoundError(Exception):
+    """Raised when a product does not exist in the requested store scope."""
+
+    def __init__(self, product_id: str) -> None:
+        super().__init__(f"Product '{product_id}' not found.")
+        self.product_id = product_id
+
 # ---------------------------------------------------------------------------
 # Firestore client (lazy singleton)
 # ---------------------------------------------------------------------------
@@ -137,6 +162,69 @@ async def create_stock_adjustment(
         extra={"adjustment_id": adjustment_id, "product_id": data.get("product_id")},
     )
     return data
+
+
+async def apply_stock_adjustment_atomic(
+    product_id: str,
+    store_id: str,
+    adjustment_type: str,
+    quantity_delta: int,
+    adjustment_doc: dict[str, Any],
+    updated_at: Any,
+) -> tuple[Any, int]:
+    """
+    Update stock and append audit record atomically in one Firestore transaction.
+
+    Returns:
+        tuple(updated_at, new_quantity_on_hand)
+    """
+    db = _get_db()
+    transaction = db.transaction()
+    product_ref = db.collection(PRODUCTS_COLLECTION).document(product_id)
+    adjustment_ref = db.collection(ADJUSTMENTS_COLLECTION).document(adjustment_doc["adjustment_id"])
+
+    @firestore.async_transactional
+    async def _apply(txn: firestore.AsyncTransaction) -> int:
+        snapshot: DocumentSnapshot = await product_ref.get(transaction=txn)
+        if not snapshot.exists:
+            raise ProductNotFoundError(product_id)
+
+        product = _snapshot_to_dict(snapshot)
+        if product.get("store_id") != store_id:
+            raise ProductNotFoundError(product_id)
+
+        current_quantity = int(product.get("quantity_on_hand", 0))
+        is_subtraction = adjustment_type in {"REMOVE", "SALE_DEDUCTION"}
+        new_quantity = current_quantity - quantity_delta if is_subtraction else current_quantity + quantity_delta
+
+        if new_quantity < 0:
+            raise NegativeStockError(
+                current_quantity=current_quantity,
+                requested_delta=quantity_delta,
+                adjustment_type=adjustment_type,
+                resulting_quantity=new_quantity,
+            )
+
+        txn.update(
+            product_ref,
+            {
+                "quantity_on_hand": new_quantity,
+                "updated_at": updated_at,
+            },
+        )
+        txn.set(adjustment_ref, adjustment_doc)
+        return new_quantity
+
+    new_quantity = await _apply(transaction)
+    logger.info(
+        "Stock adjustment transaction committed",
+        extra={
+            "product_id": product_id,
+            "adjustment_id": adjustment_doc["adjustment_id"],
+            "new_quantity": new_quantity,
+        },
+    )
+    return updated_at, new_quantity
 
 
 # ---------------------------------------------------------------------------

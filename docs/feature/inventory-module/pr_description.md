@@ -26,9 +26,11 @@ POST   /api/v1/inventory/products/{product_id}/stock-adjustments
 
 - **Negative stock guard** — stock adjustments that would result in quantity < 0 are rejected with `400` before any Firestore write
 - **Expiry status auto-computed** — `EXPIRED` / `EXPIRING_SOON` (≤7 days) / `OK` derived from UTC clock on every create and update; cannot be set by callers
-- **Store scoping** — all queries filtered by `store_id` from the auth token; wrong store returns `404`
+- **Store scoping** — write requests include `store_id` and must match auth scope; list/get remain scoped to token store
 - **Immutable audit trail** — every stock change appends a `SALE_DEDUCTION` / `REMOVE` / `ADD` record to `stock_adjustments`
 - **Partial PATCH** — only fields explicitly provided by the caller are updated
+- **List response contract** — `GET /products` now returns `items` + `next_page_token` with `limit/page_token` support
+- **Atomic stock adjustment write** — product stock update and audit log insert happen in one Firestore transaction
 
 ## Architecture
 
@@ -38,7 +40,7 @@ POST   /api/v1/inventory/products/{product_id}/stock-adjustments
 
 ## Tests
 
-19 / 19 passing — covers happy paths, auth guards, negative stock prevention, partial updates, and 404 handling.
+20 tests defined (contract-aligned payload/response coverage, auth guards, negative stock prevention, partial updates, and 404 handling).
 
 ## Related Docs
 
