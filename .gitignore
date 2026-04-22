@@ -14,10 +14,15 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+*.log
+
+# Next.js
+.next/
 
 # Env
 .env
 .env.*
+!.env.example
 
 # OS
 .DS_Store
