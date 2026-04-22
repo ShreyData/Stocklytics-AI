@@ -7,33 +7,34 @@ All JSON fields use snake_case per project conventions.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 TRANSACTION_STATUS_COMPLETED = "COMPLETED"
 TRANSACTION_STATUS_FAILED = "FAILED"
 
+PAYMENT_METHOD_CASH = "cash"
+PAYMENT_METHOD_UPI = "upi"
+PAYMENT_METHOD_CARD = "card"
 
-# ---------------------------------------------------------------------------
-# Sub-models
-# ---------------------------------------------------------------------------
+VALID_PAYMENT_METHODS = {
+    PAYMENT_METHOD_CASH,
+    PAYMENT_METHOD_UPI,
+    PAYMENT_METHOD_CARD,
+}
+
 
 class LineItemRequest(BaseModel):
     """A single product line in a billing transaction."""
 
     product_id: str = Field(..., min_length=1)
-    quantity: int = Field(..., ge=1, description="Number of units sold. Must be ≥ 1.")
-    unit_price: float = Field(..., ge=0, description="Price per unit at time of sale.")
+    quantity: int = Field(..., ge=1, description="Number of units sold. Must be >= 1.")
 
 
 class LineItemResponse(BaseModel):
-    """Line item as stored in the transaction record."""
+    """Line item returned in billing responses."""
 
     product_id: str
     quantity: int
@@ -41,33 +42,51 @@ class LineItemResponse(BaseModel):
     line_total: float
 
 
-# ---------------------------------------------------------------------------
-# Transaction schemas
-# ---------------------------------------------------------------------------
-
 class TransactionCreateRequest(BaseModel):
-    """
-    Payload for POST /api/v1/billing/transactions.
+    """Payload for POST /api/v1/billing/transactions."""
 
-    idempotency_key is mandatory.  Callers should generate a unique key per
-    logical billing attempt (e.g. UUIDv4) and retry using the same key if a
-    network error occurs.
-    """
-
+    store_id: str = Field(..., min_length=1, max_length=100)
     idempotency_key: str = Field(..., min_length=1, max_length=256)
+    customer_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    payment_method: str = Field(..., min_length=1, max_length=20)
     items: list[LineItemRequest] = Field(..., min_length=1)
-    notes: Optional[str] = Field(default=None, max_length=1000)
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, value: str) -> str:
+        if value not in VALID_PAYMENT_METHODS:
+            raise ValueError(
+                f"payment_method must be one of {sorted(VALID_PAYMENT_METHODS)}"
+            )
+        return value
 
 
-class TransactionResponse(BaseModel):
-    """Full transaction record returned from the API."""
+class TransactionSummaryResponse(BaseModel):
+    """Transaction summary used in list responses."""
+
+    transaction_id: str
+    customer_id: Optional[str]
+    total_amount: float
+    sale_timestamp: datetime
+    status: str
+
+
+class TransactionDetailResponse(BaseModel):
+    """Detailed transaction payload."""
 
     transaction_id: str
     store_id: str
-    idempotency_key: str
-    items: list[LineItemResponse]
-    total_amount: float
+    customer_id: Optional[str]
     status: str
-    notes: Optional[str]
-    created_by: str
-    created_at: datetime
+    payment_method: str
+    total_amount: float
+    sale_timestamp: datetime
+    items: list[LineItemResponse]
+    idempotency_key: Optional[str] = None
+
+
+class InventoryUpdateResponse(BaseModel):
+    """Inventory changes returned after successful billing."""
+
+    product_id: str
+    new_quantity_on_hand: int

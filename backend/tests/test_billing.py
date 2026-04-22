@@ -2,15 +2,10 @@
 Billing Module – Test suite.
 
 Coverage:
-    - Happy path: successful transaction creation (POST /api/v1/billing/transactions)
-    - Failure path: insufficient stock → no partial writes
-    - Idempotency: replay with same key + payload → 200 with original result
-    - Idempotency conflict: same key + different payload → 409
-
-All Firestore I/O is mocked; no external dependencies required.
-
-Run with:
-    pytest backend/tests/test_billing.py -v
+    - Happy path: successful transaction creation
+    - Failure paths: insufficient stock, missing product, invalid payload
+    - Idempotency: replay and conflict handling
+    - Read paths: list transactions and fetch one transaction
 """
 
 from __future__ import annotations
@@ -21,7 +16,6 @@ from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -29,83 +23,112 @@ from app.main import app
 client = TestClient(app, raise_server_exceptions=False)
 
 AUTH_HEADER = {"Authorization": "Bearer dev-token"}
-
-# ---------------------------------------------------------------------------
-# Shared fixtures / constants
-# ---------------------------------------------------------------------------
-
-FAKE_TXN_ID = "txn_abc123"
+STORE_ID = "store_001"
 FAKE_NOW = datetime(2026, 4, 15, 12, 0, 0, tzinfo=timezone.utc)
 FAKE_NOW_ISO = FAKE_NOW.isoformat()
 
 PRODUCT_A = {
     "product_id": "prod_aaa",
-    "store_id": "store_001",
+    "store_id": STORE_ID,
     "name": "Widget Alpha",
     "quantity_on_hand": 100,
-    "price": 10.00,
+    "price": 10.0,
 }
-
 PRODUCT_B = {
     "product_id": "prod_bbb",
-    "store_id": "store_001",
+    "store_id": STORE_ID,
     "name": "Widget Beta",
     "quantity_on_hand": 5,
-    "price": 20.00,
+    "price": 20.0,
 }
 
 VALID_PAYLOAD = {
-    "idempotency_key": "order-2026-001",
+    "store_id": STORE_ID,
+    "idempotency_key": "bill_20260402_0001",
+    "customer_id": "cust_001",
+    "payment_method": "cash",
     "items": [
-        {"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.00},
-        {"product_id": "prod_bbb", "quantity": 2, "unit_price": 20.00},
+        {"product_id": "prod_aaa", "quantity": 10},
+        {"product_id": "prod_bbb", "quantity": 2},
     ],
-    "notes": "Test order",
 }
 
-STORED_TRANSACTION: dict[str, Any] = {
-    "transaction_id": FAKE_TXN_ID,
-    "store_id": "store_001",
-    "idempotency_key": "order-2026-001",
-    "items": [
-        {"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.00, "line_total": 100.00},
-        {"product_id": "prod_bbb", "quantity": 2, "unit_price": 20.00, "line_total": 40.00},
+CREATED_RESPONSE: dict[str, Any] = {
+    "idempotent_replay": False,
+    "transaction": {
+        "transaction_id": "txn_001",
+        "store_id": STORE_ID,
+        "customer_id": "cust_001",
+        "status": "COMPLETED",
+        "payment_method": "cash",
+        "total_amount": 140.0,
+        "sale_timestamp": FAKE_NOW_ISO,
+        "items": [
+            {
+                "product_id": "prod_aaa",
+                "quantity": 10,
+                "unit_price": 10.0,
+                "line_total": 100.0,
+            },
+            {
+                "product_id": "prod_bbb",
+                "quantity": 2,
+                "unit_price": 20.0,
+                "line_total": 40.0,
+            },
+        ],
+    },
+    "inventory_updates": [
+        {"product_id": "prod_aaa", "new_quantity_on_hand": 90},
+        {"product_id": "prod_bbb", "new_quantity_on_hand": 3},
     ],
-    "total_amount": 140.00,
+}
+
+TRANSACTION_DOC = {
+    "transaction_id": "txn_001",
+    "store_id": STORE_ID,
+    "customer_id": "cust_001",
     "status": "COMPLETED",
-    "notes": "Test order",
-    "created_by": "dev_user_001",
-    "created_at": FAKE_NOW_ISO,
+    "payment_method": "cash",
+    "total_amount": 140.0,
+    "sale_timestamp": FAKE_NOW,
+    "idempotency_key": "bill_20260402_0001",
+    "items": [
+        {
+            "product_id": "prod_aaa",
+            "product_name": "Widget Alpha",
+            "quantity": 10,
+            "unit_price": 10.0,
+            "line_total": 100.0,
+        }
+    ],
 }
 
 
-def assert_error_shape(body: dict) -> None:
-    """Assert the shared error response model is present."""
-    assert "request_id" in body, "Missing request_id"
-    assert "error" in body, "Missing error object"
-    assert "code" in body["error"], "Missing error.code"
-    assert "message" in body["error"], "Missing error.message"
-    assert "details" in body["error"], "Missing error.details"
+def assert_error_shape(body: dict[str, Any]) -> None:
+    assert "request_id" in body
+    assert "error" in body
+    assert "code" in body["error"]
+    assert "message" in body["error"]
+    assert "details" in body["error"]
 
 
-def _payload_hash(items: list[dict]) -> str:
-    """Reproduce the service's payload hash for test assertions."""
-    canonical = sorted(items, key=lambda x: x["product_id"])
+def payload_hash(payload: dict[str, Any]) -> str:
+    canonical = {
+        "store_id": payload["store_id"],
+        "customer_id": payload.get("customer_id"),
+        "payment_method": payload["payment_method"],
+        "items": sorted(payload["items"], key=lambda item: item["product_id"]),
+    }
     raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Test Class 1: Happy path – successful transaction
-# ---------------------------------------------------------------------------
-
-class TestCreateTransactionSuccess:
-    """POST /api/v1/billing/transactions – all stock available, new key."""
-
-    def _mock_products(self):
+class TestCreateTransaction:
+    def mock_products(self) -> dict[str, dict[str, Any]]:
         return {"prod_aaa": PRODUCT_A, "prod_bbb": PRODUCT_B}
 
-    def test_returns_201(self):
+    def test_returns_201_for_new_transaction(self):
         with (
             patch(
                 "app.modules.billing.service.repository.get_idempotency_record",
@@ -115,12 +138,12 @@ class TestCreateTransactionSuccess:
             patch(
                 "app.modules.billing.service.repository.get_products_by_ids",
                 new_callable=AsyncMock,
-                return_value=self._mock_products(),
+                return_value=self.mock_products(),
             ),
             patch(
                 "app.modules.billing.service.repository.create_billing_transaction",
                 new_callable=AsyncMock,
-                return_value=STORED_TRANSACTION,
+                return_value=CREATED_RESPONSE,
             ),
         ):
             response = client.post(
@@ -130,159 +153,80 @@ class TestCreateTransactionSuccess:
             )
         assert response.status_code == 201
 
-    def test_response_contains_request_id(self):
+    def test_returns_contract_shape(self):
         with (
             patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
-            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=self._mock_products()),
-            patch("app.modules.billing.service.repository.create_billing_transaction", new_callable=AsyncMock, return_value=STORED_TRANSACTION),
+            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=self.mock_products()),
+            patch("app.modules.billing.service.repository.create_billing_transaction", new_callable=AsyncMock, return_value=CREATED_RESPONSE),
         ):
             body = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER).json()
-        assert "request_id" in body
-
-    def test_response_body_shape(self):
-        with (
-            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
-            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=self._mock_products()),
-            patch("app.modules.billing.service.repository.create_billing_transaction", new_callable=AsyncMock, return_value=STORED_TRANSACTION),
-        ):
-            body = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER).json()
-        txn = body["transaction"]
-        assert "transaction_id" in txn
-        assert "store_id" in txn
-        assert "idempotency_key" in txn
-        assert "items" in txn
-        assert "total_amount" in txn
-        assert "status" in txn
-
-    def test_status_is_completed(self):
-        with (
-            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
-            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=self._mock_products()),
-            patch("app.modules.billing.service.repository.create_billing_transaction", new_callable=AsyncMock, return_value=STORED_TRANSACTION),
-        ):
-            body = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER).json()
-        assert body["transaction"]["status"] == "COMPLETED"
-
-    def test_total_amount_is_correct(self):
-        with (
-            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
-            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=self._mock_products()),
-            patch("app.modules.billing.service.repository.create_billing_transaction", new_callable=AsyncMock, return_value=STORED_TRANSACTION),
-        ):
-            body = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER).json()
-        # 10*10 + 2*20 = 140
-        assert body["transaction"]["total_amount"] == 140.00
+        assert body["idempotent_replay"] is False
+        assert "transaction" in body
+        assert "inventory_updates" in body
+        assert body["transaction"]["payment_method"] == "cash"
 
     def test_requires_auth(self):
         response = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD)
         assert response.status_code == 401
         assert_error_shape(response.json())
 
-    def test_rejects_empty_items(self):
-        bad_payload = {**VALID_PAYLOAD, "items": []}
+    def test_rejects_missing_store_id(self):
+        bad_payload = {key: value for key, value in VALID_PAYLOAD.items() if key != "store_id"}
         response = client.post("/api/v1/billing/transactions", json=bad_payload, headers=AUTH_HEADER)
         assert response.status_code == 400
 
-    def test_rejects_missing_idempotency_key(self):
-        bad_payload = {k: v for k, v in VALID_PAYLOAD.items() if k != "idempotency_key"}
+    def test_rejects_missing_payment_method(self):
+        bad_payload = {key: value for key, value in VALID_PAYLOAD.items() if key != "payment_method"}
+        response = client.post("/api/v1/billing/transactions", json=bad_payload, headers=AUTH_HEADER)
+        assert response.status_code == 400
+
+    def test_rejects_empty_items(self):
+        bad_payload = {**VALID_PAYLOAD, "items": []}
         response = client.post("/api/v1/billing/transactions", json=bad_payload, headers=AUTH_HEADER)
         assert response.status_code == 400
 
     def test_rejects_zero_quantity(self):
         bad_payload = {
             **VALID_PAYLOAD,
-            "idempotency_key": "order-zero-qty",
-            "items": [{"product_id": "prod_aaa", "quantity": 0, "unit_price": 10.00}],
+            "items": [{"product_id": "prod_aaa", "quantity": 0}],
         }
         response = client.post("/api/v1/billing/transactions", json=bad_payload, headers=AUTH_HEADER)
         assert response.status_code == 400
 
 
-# ---------------------------------------------------------------------------
-# Test Class 2: Insufficient stock – no partial writes
-# ---------------------------------------------------------------------------
-
-class TestInsufficientStock:
-    """
-    Billing must reject the entire request when ANY item lacks sufficient stock.
-    No stock should be deducted for items that did have enough stock.
-    """
-
-    def test_returns_400_when_stock_insufficient(self):
-        """
-        prod_bbb has only 5 units but we request 10.
-        The whole transaction must fail with 400.
-        """
+class TestBillingFailures:
+    def test_returns_409_when_stock_insufficient(self):
         low_stock_products = {
-            "prod_aaa": {**PRODUCT_A, "quantity_on_hand": 100},
-            "prod_bbb": {**PRODUCT_B, "quantity_on_hand": 5},   # only 5 available
-        }
-        payload = {
-            "idempotency_key": "order-insufficient",
-            "items": [
-                {"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.00},
-                {"product_id": "prod_bbb", "quantity": 10, "unit_price": 20.00},  # 10 > 5
-            ],
+            "prod_aaa": PRODUCT_A,
+            "prod_bbb": {**PRODUCT_B, "quantity_on_hand": 1},
         }
         with (
             patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
             patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=low_stock_products),
         ):
-            response = client.post("/api/v1/billing/transactions", json=payload, headers=AUTH_HEADER)
-        assert response.status_code == 400
+            response = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER)
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "INSUFFICIENT_STOCK"
 
-    def test_error_shape_on_insufficient_stock(self):
-        low_stock_products = {
-            "prod_aaa": {**PRODUCT_A, "quantity_on_hand": 1},
-        }
+    def test_no_write_called_when_stock_insufficient(self):
+        write_mock = AsyncMock()
+        low_stock_products = {"prod_aaa": {**PRODUCT_A, "quantity_on_hand": 1}}
         payload = {
-            "idempotency_key": "order-insuff2",
-            "items": [{"product_id": "prod_aaa", "quantity": 50, "unit_price": 10.00}],
+            **VALID_PAYLOAD,
+            "items": [{"product_id": "prod_aaa", "quantity": 10}],
         }
         with (
             patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
             patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=low_stock_products),
-        ):
-            response = client.post("/api/v1/billing/transactions", json=payload, headers=AUTH_HEADER)
-        assert_error_shape(response.json())
-        assert response.json()["error"]["code"] == "INVALID_REQUEST"
-
-    def test_error_details_include_insufficient_items(self):
-        low_stock_products = {"prod_aaa": {**PRODUCT_A, "quantity_on_hand": 3}}
-        payload = {
-            "idempotency_key": "order-insuff3",
-            "items": [{"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.00}],
-        }
-        with (
-            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
-            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=low_stock_products),
-        ):
-            response = client.post("/api/v1/billing/transactions", json=payload, headers=AUTH_HEADER)
-        details = response.json()["error"]["details"]
-        assert "insufficient_items" in details
-        assert details["insufficient_items"][0]["product_id"] == "prod_aaa"
-
-    def test_firestore_write_not_called_on_insufficient_stock(self):
-        """create_billing_transaction must never be called when stock fails."""
-        mock_write = AsyncMock()
-        low_stock_products = {"prod_aaa": {**PRODUCT_A, "quantity_on_hand": 0}}
-        payload = {
-            "idempotency_key": "order-nowrite",
-            "items": [{"product_id": "prod_aaa", "quantity": 5, "unit_price": 10.00}],
-        }
-        with (
-            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
-            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=low_stock_products),
-            patch("app.modules.billing.service.repository.create_billing_transaction", mock_write),
+            patch("app.modules.billing.service.repository.create_billing_transaction", write_mock),
         ):
             client.post("/api/v1/billing/transactions", json=payload, headers=AUTH_HEADER)
-        mock_write.assert_not_called()
+        write_mock.assert_not_called()
 
-    def test_missing_product_returns_404(self):
-        """A product_id that doesn't exist in the store must return 404."""
+    def test_returns_404_when_product_missing(self):
         payload = {
-            "idempotency_key": "order-missing-prod",
-            "items": [{"product_id": "prod_ghost", "quantity": 1, "unit_price": 5.00}],
+            **VALID_PAYLOAD,
+            "items": [{"product_id": "prod_missing", "quantity": 1}],
         }
         with (
             patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
@@ -290,127 +234,139 @@ class TestInsufficientStock:
         ):
             response = client.post("/api/v1/billing/transactions", json=payload, headers=AUTH_HEADER)
         assert response.status_code == 404
-        assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "PRODUCT_NOT_FOUND"
 
+    def test_duplicate_line_items_are_aggregated_for_stock_check(self):
+        payload = {
+            **VALID_PAYLOAD,
+            "items": [
+                {"product_id": "prod_bbb", "quantity": 3},
+                {"product_id": "prod_bbb", "quantity": 3},
+            ],
+        }
+        with (
+            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
+            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value={"prod_bbb": PRODUCT_B}),
+        ):
+            response = client.post("/api/v1/billing/transactions", json=payload, headers=AUTH_HEADER)
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "INSUFFICIENT_STOCK"
 
-# ---------------------------------------------------------------------------
-# Test Class 3: Idempotency
-# ---------------------------------------------------------------------------
 
 class TestIdempotency:
-    """
-    Same idempotency_key + same payload → return original result (HTTP 200).
-    Same idempotency_key + different payload → HTTP 409.
-    """
-
-    def _make_idempotency_record(self, items: list[dict]) -> dict[str, Any]:
-        """Build the stored idempotency record that the repository would return."""
-        canonical = sorted(items, key=lambda x: x["product_id"])
-        raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-        payload_hash = hashlib.sha256(raw.encode()).hexdigest()
+    def make_idempotency_record(self) -> dict[str, Any]:
         return {
-            "idempotency_key": "order-2026-001",
-            "store_id": "store_001",
-            "payload_hash": payload_hash,
-            "transaction_id": FAKE_TXN_ID,
-            "transaction_snapshot": STORED_TRANSACTION,
+            "idempotency_record_id": f"{STORE_ID}_bill_20260402_0001",
+            "store_id": STORE_ID,
+            "idempotency_key": "bill_20260402_0001",
+            "request_hash": payload_hash(VALID_PAYLOAD),
+            "transaction_id": "txn_001",
+            "result_status": "COMPLETED",
+            "response_snapshot": CREATED_RESPONSE,
             "created_at": FAKE_NOW,
+            "last_seen_at": FAKE_NOW,
         }
 
-    def test_replay_returns_200(self):
-        """Re-sending the identical request must return HTTP 200 (not 201)."""
-        items = [
-            {"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.0},
-            {"product_id": "prod_bbb", "quantity": 2, "unit_price": 20.0},
-        ]
-        idp_record = self._make_idempotency_record(items)
-        with patch(
-            "app.modules.billing.service.repository.get_idempotency_record",
-            new_callable=AsyncMock,
-            return_value=idp_record,
-        ):
-            response = client.post(
-                "/api/v1/billing/transactions",
-                json=VALID_PAYLOAD,
-                headers=AUTH_HEADER,
-            )
-        assert response.status_code == 200
-
-    def test_replay_returns_original_transaction(self):
-        """The replayed response must contain the originally stored transaction."""
-        items = [
-            {"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.0},
-            {"product_id": "prod_bbb", "quantity": 2, "unit_price": 20.0},
-        ]
-        idp_record = self._make_idempotency_record(items)
-        with patch(
-            "app.modules.billing.service.repository.get_idempotency_record",
-            new_callable=AsyncMock,
-            return_value=idp_record,
-        ):
-            body = client.post(
-                "/api/v1/billing/transactions",
-                json=VALID_PAYLOAD,
-                headers=AUTH_HEADER,
-            ).json()
-        assert body["transaction"]["transaction_id"] == FAKE_TXN_ID
-
-    def test_replay_does_not_call_write(self):
-        """On idempotent replay, create_billing_transaction must NOT be called."""
-        items = [
-            {"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.0},
-            {"product_id": "prod_bbb", "quantity": 2, "unit_price": 20.0},
-        ]
-        idp_record = self._make_idempotency_record(items)
-        mock_write = AsyncMock()
+    def test_same_key_same_payload_returns_200(self):
         with (
-            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=idp_record),
-            patch("app.modules.billing.service.repository.create_billing_transaction", mock_write),
+            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=self.make_idempotency_record()),
+            patch("app.modules.billing.service.repository.touch_idempotency_record", new_callable=AsyncMock),
         ):
-            client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER)
-        mock_write.assert_not_called()
+            response = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER)
+        assert response.status_code == 200
+        assert response.json()["idempotent_replay"] is True
 
-    def test_conflict_returns_409_for_different_payload(self):
-        """
-        Reusing an idempotency_key with a different payload must return 409 CONFLICT.
-        """
-        # Stored record was for quantity=10; new request sends quantity=99
-        original_items = [{"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.0}]
-        idp_record = self._make_idempotency_record(original_items)
+    def test_same_key_same_payload_returns_summary(self):
+        with (
+            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=self.make_idempotency_record()),
+            patch("app.modules.billing.service.repository.touch_idempotency_record", new_callable=AsyncMock),
+        ):
+            body = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER).json()
+        assert body["transaction"]["transaction_id"] == "txn_001"
+        assert body["transaction"]["status"] == "COMPLETED"
+        assert body["transaction"]["total_amount"] == 140.0
 
+    def test_same_key_different_payload_returns_409(self):
         conflicting_payload = {
-            "idempotency_key": "order-2026-001",  # same key
-            "items": [{"product_id": "prod_aaa", "quantity": 99, "unit_price": 10.00}],  # different qty
+            **VALID_PAYLOAD,
+            "items": [{"product_id": "prod_aaa", "quantity": 99}],
         }
         with patch(
             "app.modules.billing.service.repository.get_idempotency_record",
             new_callable=AsyncMock,
-            return_value=idp_record,
+            return_value=self.make_idempotency_record(),
         ):
-            response = client.post(
-                "/api/v1/billing/transactions",
-                json=conflicting_payload,
-                headers=AUTH_HEADER,
-            )
+            response = client.post("/api/v1/billing/transactions", json=conflicting_payload, headers=AUTH_HEADER)
         assert response.status_code == 409
+        assert response.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
 
-    def test_conflict_error_shape(self):
-        """The 409 response must still follow the shared error envelope."""
-        original_items = [{"product_id": "prod_aaa", "quantity": 10, "unit_price": 10.0}]
-        idp_record = self._make_idempotency_record(original_items)
-        conflicting_payload = {
-            "idempotency_key": "order-2026-001",
-            "items": [{"product_id": "prod_aaa", "quantity": 1, "unit_price": 5.00}],
-        }
+
+class TestReadTransactions:
+    def test_list_transactions_returns_items(self):
+        transaction_docs = [
+            {
+                "transaction_id": "txn_001",
+                "customer_id": "cust_001",
+                "total_amount": 140.0,
+                "sale_timestamp": FAKE_NOW,
+                "status": "COMPLETED",
+            }
+        ]
         with patch(
-            "app.modules.billing.service.repository.get_idempotency_record",
+            "app.modules.billing.service.repository.list_transactions",
             new_callable=AsyncMock,
-            return_value=idp_record,
+            return_value=transaction_docs,
         ):
-            response = client.post(
-                "/api/v1/billing/transactions",
-                json=conflicting_payload,
-                headers=AUTH_HEADER,
-            )
-        assert_error_shape(response.json())
-        assert response.json()["error"]["code"] == "CONFLICT"
+            response = client.get("/api/v1/billing/transactions", headers=AUTH_HEADER)
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["items"]) == 1
+        assert body["next_page_token"] is None
+
+    def test_list_transactions_supports_pagination(self):
+        transaction_docs = [
+            {
+                "transaction_id": "txn_001",
+                "customer_id": "cust_001",
+                "total_amount": 140.0,
+                "sale_timestamp": FAKE_NOW,
+                "status": "COMPLETED",
+            },
+            {
+                "transaction_id": "txn_002",
+                "customer_id": None,
+                "total_amount": 55.0,
+                "sale_timestamp": FAKE_NOW,
+                "status": "COMPLETED",
+            },
+        ]
+        with patch(
+            "app.modules.billing.service.repository.list_transactions",
+            new_callable=AsyncMock,
+            return_value=transaction_docs,
+        ):
+            response = client.get("/api/v1/billing/transactions?limit=1", headers=AUTH_HEADER)
+        assert response.status_code == 200
+        assert response.json()["next_page_token"] == "1"
+
+    def test_get_transaction_returns_detail(self):
+        with patch(
+            "app.modules.billing.service.repository.get_transaction_by_id",
+            new_callable=AsyncMock,
+            return_value=TRANSACTION_DOC,
+        ):
+            response = client.get("/api/v1/billing/transactions/txn_001", headers=AUTH_HEADER)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["transaction"]["transaction_id"] == "txn_001"
+        assert body["transaction"]["idempotency_key"] == "bill_20260402_0001"
+
+    def test_get_missing_transaction_returns_404(self):
+        with patch(
+            "app.modules.billing.service.repository.get_transaction_by_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            response = client.get("/api/v1/billing/transactions/txn_missing", headers=AUTH_HEADER)
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "TRANSACTION_NOT_FOUND"
