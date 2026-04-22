@@ -1,29 +1,13 @@
 """
 Billing Module – Repository layer.
 
-Isolates every Firestore read/write for the billing domain.
-The service layer is the only caller; routes never touch Firestore directly.
-
-Collections used:
-    transactions          – one document per completed billing transaction
-    billing_idempotency   – idempotency key → stored result mapping
-    products              – read-only; owned by Inventory module
-    stock_adjustments     – write-only audit records created by billing
-
-Firestore transaction:
-    create_billing_transaction() executes a single atomic Firestore
-    transaction that:
-        1. Writes the transaction document.
-        2. Updates each product's quantity_on_hand.
-        3. Inserts a stock_adjustment record per line item.
-        4. Writes the idempotency record.
-    If any step fails the entire transaction is rolled back.
+Isolates Firestore access for the billing domain.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 
 from google.cloud import firestore
@@ -33,9 +17,29 @@ from app.common.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Firestore client (lazy singleton)
-# ---------------------------------------------------------------------------
+
+class BillingCommitProductNotFoundError(Exception):
+    """Raised when a product disappears or leaves store scope during commit."""
+
+    def __init__(self, product_id: str) -> None:
+        super().__init__(f"Product '{product_id}' not found.")
+        self.product_id = product_id
+
+
+class BillingCommitInsufficientStockError(Exception):
+    """Raised when stock is insufficient at commit time."""
+
+    def __init__(
+        self,
+        product_id: str,
+        requested_quantity: int,
+        available_quantity: int,
+    ) -> None:
+        super().__init__(f"Insufficient stock for '{product_id}'.")
+        self.product_id = product_id
+        self.requested_quantity = requested_quantity
+        self.available_quantity = available_quantity
+
 
 _db: Optional[firestore.AsyncClient] = None
 
@@ -50,145 +54,198 @@ def _get_db() -> firestore.AsyncClient:
     return _db
 
 
-# ---------------------------------------------------------------------------
-# Collection names
-# ---------------------------------------------------------------------------
-
 COL_TRANSACTIONS = "transactions"
 COL_IDEMPOTENCY = "billing_idempotency"
 COL_PRODUCTS = "products"
 COL_ADJUSTMENTS = "stock_adjustments"
 
 
-# ---------------------------------------------------------------------------
-# Read helpers
-# ---------------------------------------------------------------------------
-
 async def get_idempotency_record(
-    store_id: str, idempotency_key: str
+    store_id: str,
+    idempotency_key: str,
 ) -> Optional[dict[str, Any]]:
-    """
-    Look up an existing idempotency record.
-
-    The document ID is ``{store_id}_{idempotency_key}`` to ensure keys are
-    scoped per store and cannot collide across tenants.
-    """
+    """Look up an existing idempotency record by composite key."""
     db = _get_db()
     doc_id = _idempotency_doc_id(store_id, idempotency_key)
-    doc: DocumentSnapshot = await db.collection(COL_IDEMPOTENCY).document(doc_id).get()
-    if not doc.exists:
+    snapshot: DocumentSnapshot = await db.collection(COL_IDEMPOTENCY).document(doc_id).get()
+    if not snapshot.exists:
         return None
-    return doc.to_dict()
+    return snapshot.to_dict()
+
+
+async def touch_idempotency_record(
+    idempotency_doc_id: str,
+    last_seen_at: datetime,
+) -> None:
+    """Update the replay timestamp on an existing idempotency record."""
+    db = _get_db()
+    await db.collection(COL_IDEMPOTENCY).document(idempotency_doc_id).update(
+        {"last_seen_at": last_seen_at}
+    )
 
 
 async def get_products_by_ids(product_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """
-    Batch-fetch product documents by ID.
-
-    Returns a dict mapping product_id → document data.
-    Missing products are absent from the result (caller must detect them).
-    """
+    """Batch-fetch product documents by ID."""
     db = _get_db()
-    col = db.collection(COL_PRODUCTS)
-    refs = [col.document(pid) for pid in product_ids]
+    refs = [db.collection(COL_PRODUCTS).document(product_id) for product_id in product_ids]
     snapshots: list[DocumentSnapshot] = await db.get_all(refs)  # type: ignore[attr-defined]
 
     result: dict[str, dict[str, Any]] = {}
-    for snap in snapshots:
-        if snap.exists:
-            data = snap.to_dict() or {}
-            pid = data.get("product_id") or snap.id
-            result[pid] = data
+    for snapshot in snapshots:
+        if snapshot.exists:
+            data = snapshot.to_dict() or {}
+            result[data.get("product_id") or snapshot.id] = data
     return result
 
 
-# ---------------------------------------------------------------------------
-# Atomic write
-# ---------------------------------------------------------------------------
+async def list_transactions(
+    store_id: str,
+    from_timestamp: Optional[datetime] = None,
+    to_timestamp: Optional[datetime] = None,
+    customer_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """List transactions for a store with optional filters."""
+    db = _get_db()
+    query = db.collection(COL_TRANSACTIONS).where("store_id", "==", store_id)
+
+    if customer_id is not None:
+        query = query.where("customer_id", "==", customer_id)
+    if from_timestamp is not None:
+        query = query.where("sale_timestamp", ">=", from_timestamp)
+    if to_timestamp is not None:
+        query = query.where("sale_timestamp", "<=", to_timestamp)
+
+    docs = query.stream()
+    results: list[dict[str, Any]] = []
+    async for doc in docs:
+        data = doc.to_dict() or {}
+        data.setdefault("transaction_id", doc.id)
+        results.append(data)
+
+    results.sort(key=lambda item: item.get("sale_timestamp"), reverse=True)
+    return results
+
+
+async def get_transaction_by_id(transaction_id: str) -> Optional[dict[str, Any]]:
+    """Fetch a single transaction by document ID."""
+    db = _get_db()
+    snapshot: DocumentSnapshot = await db.collection(COL_TRANSACTIONS).document(transaction_id).get()
+    if not snapshot.exists:
+        return None
+    data = snapshot.to_dict() or {}
+    data.setdefault("transaction_id", snapshot.id)
+    return data
+
 
 async def create_billing_transaction(
     *,
     transaction_id: str,
     transaction_doc: dict[str, Any],
     idempotency_doc_id: str,
-    idempotency_doc: dict[str, Any],
-    stock_updates: list[dict[str, Any]],
+    idempotency_key: str,
+    store_id: str,
+    request_hash: str,
+    result_status: str,
+    response_transaction: dict[str, Any],
+    inventory_deductions: list[dict[str, Any]],
     adjustment_docs: list[tuple[str, dict[str, Any]]],
+    created_at: datetime,
 ) -> dict[str, Any]:
     """
-    Execute a single Firestore transaction that atomically:
+    Execute a single atomic Firestore transaction for billing.
 
-    1. Writes the ``transactions`` document.
-    2. Decrements ``quantity_on_hand`` on each product.
-    3. Inserts a ``stock_adjustments`` record per line item.
-    4. Writes the ``billing_idempotency`` record.
-
-    If any step fails, Firestore rolls back all writes automatically.
-
-    Args:
-        transaction_id:     The new transaction's document ID.
-        transaction_doc:    Full transaction document data.
-        idempotency_doc_id: Pre-computed idempotency doc ID.
-        idempotency_doc:    Idempotency document data to store.
-        stock_updates:      List of {product_id, new_quantity} dicts.
-        adjustment_docs:    List of (adjustment_id, adjustment_doc) tuples.
-
-    Returns:
-        The transaction document data that was written.
+    Writes:
+    - transactions document
+    - stock deductions
+    - stock adjustment audit rows
+    - billing_idempotency document
     """
     db = _get_db()
+    transaction = db.transaction()
+    transaction_ref = db.collection(COL_TRANSACTIONS).document(transaction_id)
+    idempotency_ref = db.collection(COL_IDEMPOTENCY).document(idempotency_doc_id)
 
-    async with db.transaction() as tx:  # type: ignore[attr-defined]
-        col_txn = db.collection(COL_TRANSACTIONS)
-        col_idp = db.collection(COL_IDEMPOTENCY)
-        col_prod = db.collection(COL_PRODUCTS)
-        col_adj = db.collection(COL_ADJUSTMENTS)
+    @firestore.async_transactional
+    async def _apply(txn: firestore.AsyncTransaction) -> dict[str, Any]:
+        inventory_updates: list[dict[str, Any]] = []
 
-        now = datetime.now(timezone.utc)
+        for deduction in inventory_deductions:
+            product_id = deduction["product_id"]
+            quantity_delta = int(deduction["quantity_delta"])
+            product_ref = db.collection(COL_PRODUCTS).document(product_id)
+            snapshot: DocumentSnapshot = await product_ref.get(transaction=txn)
 
-        # 1. Write transaction document
-        tx.set(col_txn.document(transaction_id), transaction_doc)
+            if not snapshot.exists:
+                raise BillingCommitProductNotFoundError(product_id)
 
-        # 2. Update stock levels
-        for upd in stock_updates:
-            tx.update(
-                col_prod.document(upd["product_id"]),
+            product = snapshot.to_dict() or {}
+            if product.get("store_id") != store_id:
+                raise BillingCommitProductNotFoundError(product_id)
+
+            available_quantity = int(product.get("quantity_on_hand", 0))
+            if quantity_delta > available_quantity:
+                raise BillingCommitInsufficientStockError(
+                    product_id=product_id,
+                    requested_quantity=quantity_delta,
+                    available_quantity=available_quantity,
+                )
+
+            new_quantity = available_quantity - quantity_delta
+            txn.update(
+                product_ref,
                 {
-                    "quantity_on_hand": upd["new_quantity"],
-                    "updated_at": now,
+                    "quantity_on_hand": new_quantity,
+                    "updated_at": created_at,
                 },
             )
+            inventory_updates.append(
+                {
+                    "product_id": product_id,
+                    "new_quantity_on_hand": new_quantity,
+                }
+            )
 
-        # 3. Insert stock_adjustment audit records
-        for adj_id, adj_doc in adjustment_docs:
-            tx.set(col_adj.document(adj_id), adj_doc)
+        txn.set(transaction_ref, transaction_doc)
 
-        # 4. Save idempotency record
-        tx.set(col_idp.document(idempotency_doc_id), idempotency_doc)
+        for adjustment_id, adjustment_doc in adjustment_docs:
+            txn.set(
+                db.collection(COL_ADJUSTMENTS).document(adjustment_id),
+                adjustment_doc,
+            )
 
+        response_snapshot = {
+            "idempotent_replay": False,
+            "transaction": response_transaction,
+            "inventory_updates": inventory_updates,
+        }
+        idempotency_doc = {
+            "idempotency_record_id": idempotency_doc_id,
+            "store_id": store_id,
+            "idempotency_key": idempotency_key,
+            "request_hash": request_hash,
+            "transaction_id": transaction_id,
+            "result_status": result_status,
+            "response_snapshot": response_snapshot,
+            "created_at": created_at,
+            "last_seen_at": created_at,
+        }
+        txn.set(idempotency_ref, idempotency_doc)
+        return response_snapshot
+
+    response_snapshot = await _apply(transaction)
     logger.info(
         "Billing transaction committed",
         extra={
             "transaction_id": transaction_id,
-            "idempotency_doc_id": idempotency_doc_id,
+            "idempotency_key": idempotency_key,
         },
     )
-    return transaction_doc
+    return response_snapshot
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _idempotency_doc_id(store_id: str, idempotency_key: str) -> str:
-    """
-    Build the Firestore document ID for an idempotency record.
-
-    Scoped per store so the same key cannot clash across tenants.
-    The separator ``::`` is URL-safe and unlikely to appear in user keys.
-    """
-    return f"{store_id}::{idempotency_key}"
+    """Build the Firestore document ID for an idempotency record."""
+    return f"{store_id}_{idempotency_key}"
 
 
-# Expose helper so the service can use it without re-importing internals.
 get_idempotency_doc_id = _idempotency_doc_id
