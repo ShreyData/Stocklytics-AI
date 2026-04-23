@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.modules.billing.repository import BillingCommitCustomerNotFoundError
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -165,6 +166,23 @@ class TestCreateTransaction:
         assert "inventory_updates" in body
         assert body["transaction"]["payment_method"] == "cash"
 
+    def test_passes_customer_summary_update_for_linked_customer(self):
+        create_mock = AsyncMock(return_value=CREATED_RESPONSE)
+        with (
+            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
+            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value=self.mock_products()),
+            patch("app.modules.billing.service.repository.create_billing_transaction", create_mock),
+        ):
+            response = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD, headers=AUTH_HEADER)
+        assert response.status_code == 201
+
+        kwargs = create_mock.await_args.kwargs
+        assert kwargs["customer_summary_update"] == {
+            "customer_id": "cust_001",
+            "sale_amount": 140.0,
+            "sale_timestamp": FAKE_NOW,
+        }
+
     def test_requires_auth(self):
         response = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD)
         assert response.status_code == 401
@@ -235,6 +253,25 @@ class TestBillingFailures:
             response = client.post("/api/v1/billing/transactions", json=payload, headers=AUTH_HEADER)
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "PRODUCT_NOT_FOUND"
+
+    def test_returns_404_when_customer_missing_on_commit(self):
+        with (
+            patch("app.modules.billing.service.repository.get_idempotency_record", new_callable=AsyncMock, return_value=None),
+            patch("app.modules.billing.service.repository.get_products_by_ids", new_callable=AsyncMock, return_value={"prod_aaa": PRODUCT_A}),
+            patch(
+                "app.modules.billing.service.repository.create_billing_transaction",
+                new_callable=AsyncMock,
+                side_effect=BillingCommitCustomerNotFoundError("cust_missing"),
+            ),
+        ):
+            payload = {
+                **VALID_PAYLOAD,
+                "items": [{"product_id": "prod_aaa", "quantity": 1}],
+                "customer_id": "cust_missing",
+            }
+            response = client.post("/api/v1/billing/transactions", json=payload, headers=AUTH_HEADER)
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "CUSTOMER_NOT_FOUND"
 
     def test_duplicate_line_items_are_aggregated_for_stock_check(self):
         payload = {
