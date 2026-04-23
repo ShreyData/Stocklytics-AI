@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class InvalidAlertQueryError(AppValidationError):
+    """Raised when alerts query parameters fail validation."""
+
+    error_code = "INVALID_QUERY"
+
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/alerts
 # ---------------------------------------------------------------------------
@@ -75,24 +81,24 @@ async def list_alerts(
     """
     # Validate store scope if explicitly provided
     if store_id is not None and store_id != user.store_id:
-        raise AppValidationError(
+        raise InvalidAlertQueryError(
             "store_id query param must match authenticated store scope.",
             details={"request_store_id": store_id, "auth_store_id": user.store_id},
         )
 
     # Validate enum query params
     if status is not None and status not in VALID_ALERT_STATUSES:
-        raise AppValidationError(
+        raise InvalidAlertQueryError(
             f"Invalid status filter. Must be one of: {sorted(VALID_ALERT_STATUSES)}",
             details={"status": status},
         )
     if alert_type is not None and alert_type not in VALID_ALERT_TYPES:
-        raise AppValidationError(
+        raise InvalidAlertQueryError(
             f"Invalid alert_type filter. Must be one of: {sorted(VALID_ALERT_TYPES)}",
             details={"alert_type": alert_type},
         )
     if severity is not None and severity not in VALID_ALERT_SEVERITIES:
-        raise AppValidationError(
+        raise InvalidAlertQueryError(
             f"Invalid severity filter. Must be one of: {sorted(VALID_ALERT_SEVERITIES)}",
             details={"severity": severity},
         )
@@ -123,7 +129,7 @@ async def get_alerts_summary(
         active, acknowledged, resolved_today.
     """
     if store_id is not None and store_id != user.store_id:
-        raise AppValidationError(
+        raise InvalidAlertQueryError(
             "store_id query param must match authenticated store scope.",
             details={"request_store_id": store_id, "auth_store_id": user.store_id},
         )

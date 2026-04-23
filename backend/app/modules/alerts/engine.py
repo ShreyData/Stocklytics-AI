@@ -28,6 +28,7 @@ async def _create_or_update_alert(
     severity: str,
     title: str,
     message: str,
+    metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Helper to upsert an alert based on condition key."""
     now = datetime.now(timezone.utc)
@@ -40,6 +41,7 @@ async def _create_or_update_alert(
             "severity": severity,
             "title": title,
             "message": message,
+            "metadata": metadata,
             "last_evaluated_at": now,
         }
         updated = await repository.update_alert(alert_id, updates)
@@ -57,6 +59,7 @@ async def _create_or_update_alert(
         "severity": severity,
         "title": title,
         "message": message,
+        "metadata": metadata,
         "created_at": now,
         "last_evaluated_at": now,
         "acknowledged_at": None,
@@ -108,7 +111,7 @@ async def evaluate_low_stock(
     reorder_threshold: int
 ) -> None:
     """Evaluate low stock condition for a product."""
-    condition_key = f"low_stock_{product_id}"
+    condition_key = f"LOW_STOCK_{product_id}"
     
     if current_stock <= reorder_threshold:
         severity = "CRITICAL" if current_stock == 0 else "HIGH"
@@ -122,6 +125,10 @@ async def evaluate_low_stock(
             severity=severity,
             title=title,
             message=message,
+            metadata={
+                "quantity_on_hand": current_stock,
+                "reorder_threshold": reorder_threshold,
+            },
         )
     else:
         await _resolve_if_exists(store_id, condition_key)
@@ -135,7 +142,7 @@ async def evaluate_expiry_soon(
     current_stock: int
 ) -> None:
     """Evaluate expiry condition for a product."""
-    condition_key = f"expiry_soon_{product_id}"
+    condition_key = f"EXPIRY_SOON_{product_id}"
     
     if expiry_date is None or current_stock <= 0:
         await _resolve_if_exists(store_id, condition_key)
@@ -166,6 +173,11 @@ async def evaluate_expiry_soon(
             severity=severity,
             title=title,
             message=message,
+            metadata={
+                "quantity_on_hand": current_stock,
+                "expiry_date": expiry_date,
+                "days_to_expiry": delta_days,
+            },
         )
     else:
         await _resolve_if_exists(store_id, condition_key)
