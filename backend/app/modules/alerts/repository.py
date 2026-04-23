@@ -60,6 +60,27 @@ async def get_alert_by_id(alert_id: str) -> Optional[dict[str, Any]]:
     return _snapshot_to_dict(doc)
 
 
+async def get_alert_by_condition(store_id: str, condition_key: str) -> Optional[dict[str, Any]]:
+    """
+    Fetch the open (ACTIVE or ACKNOWLEDGED) alert for a given condition_key.
+    Returns None if no open alert exists.
+    """
+    from app.modules.alerts.schemas import ALERT_STATUS_RESOLVED
+    db = _get_db()
+    query = (
+        db.collection(ALERTS_COLLECTION)
+        .where("store_id", "==", store_id)
+        .where("condition_key", "==", condition_key)
+        .where("status", "!=", ALERT_STATUS_RESOLVED)
+        .limit(1)
+    )
+    
+    docs = [doc async for doc in query.stream()]
+    if not docs:
+        return None
+    return _snapshot_to_dict(docs[0])
+
+
 async def list_alerts(
     store_id: str,
     status: Optional[str] = None,
