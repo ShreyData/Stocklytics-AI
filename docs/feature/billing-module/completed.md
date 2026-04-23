@@ -1,128 +1,84 @@
 # Billing Module — Completed Implementation
 
-This document summarises all work completed on the `feature/billing-module` branch to deliver the Billing Module of the Stocklytics AI modular monolith.
-
----
+This document summarises the billing implementation currently delivered on the `feature/billing-module` branch after Plan-alignment fixes.
 
 ## Overview
 
-The Billing Module converts a basket of line items into a **fully atomic billing transaction**. Stock is validated for all items before any write occurs, deducted as part of a single Firestore transaction, and protected end-to-end by a mandatory idempotency key so that safe retries are always possible.
+The Billing Module creates sales transactions with strict all-or-nothing stock validation, mandatory idempotency, and inventory audit logging. Transaction writes, stock deductions, stock-adjustment rows, and idempotency storage are committed through one atomic Firestore path.
 
----
-
-## Files Added
+## Files Added / Updated
 
 | File | Purpose |
 |------|---------|
-| `app/modules/billing/schemas.py` | Pydantic models — `TransactionCreateRequest`, `LineItemRequest`, `TransactionResponse` |
-| `app/modules/billing/repository.py` | Firestore reads and the atomic `create_billing_transaction()` write |
-| `app/modules/billing/service.py` | Idempotency check, stock validation, payload assembly, transaction orchestration |
-| `app/modules/billing/router.py` | Single thin POST route handler |
-| `tests/test_billing.py` | 19 unit tests with all Firestore I/O fully mocked |
+| `app/modules/billing/schemas.py` | Billing request and response models aligned to approved API contracts |
+| `app/modules/billing/repository.py` | Firestore reads, transaction-safe billing commit, idempotency helpers, and read queries |
+| `app/modules/billing/service.py` | Billing orchestration, store-scope validation, idempotency replay/conflict logic, stock validation, and query responses |
+| `app/modules/billing/router.py` | Thin POST/GET route handlers |
+| `tests/test_billing.py` | Billing request, failure-path, replay, list, and fetch-one test coverage |
 
----
-
-## API Endpoint
+## API Endpoints
 
 | Method | Path | Status Code | Description |
 |--------|------|-------------|-------------|
 | `POST` | `/api/v1/billing/transactions` | 201 | Create a new billing transaction |
-| `POST` | `/api/v1/billing/transactions` | 200 | Idempotent replay — same key, same payload |
-| `POST` | `/api/v1/billing/transactions` | 409 | Idempotency key conflict — same key, different payload |
+| `POST` | `/api/v1/billing/transactions` | 200 | Safe idempotent replay |
+| `GET` | `/api/v1/billing/transactions` | 200 | List billing transactions |
+| `GET` | `/api/v1/billing/transactions/{transaction_id}` | 200 | Fetch one transaction |
 
 All requests require a valid Firebase Bearer token. Responses always include `request_id`.
 
----
-
-## Request Payload
+## Approved Request Payload
 
 ```json
 {
-  "idempotency_key": "order-2026-001",
+  "store_id": "store_001",
+  "idempotency_key": "bill_20260402_0001",
+  "customer_id": "cust_001",
+  "payment_method": "cash",
   "items": [
-    { "product_id": "prod_abc", "quantity": 10, "unit_price": 9.99 }
-  ],
-  "notes": "Optional order notes"
+    { "product_id": "prod_rice_5kg", "quantity": 2 },
+    { "product_id": "prod_biscuit_01", "quantity": 3 }
+  ]
 }
 ```
-
-`idempotency_key` is **required**. `items` must contain at least one entry with `quantity >= 1`.
-
----
 
 ## Firestore Collections
 
 ### `transactions`
-One document per completed billing transaction. Key fields: `transaction_id`, `store_id`, `idempotency_key`, `items` (array with `line_total`), `total_amount`, `status`, `notes`, `created_by`, `created_at`.
+Stores billing records with `transaction_id`, `store_id`, `idempotency_key`, `customer_id`, `payment_method`, `status`, `total_amount`, `sale_timestamp`, `items`, `created_by`, and `created_at`.
 
 ### `billing_idempotency`
-One document per unique `{store_id}::{idempotency_key}` pair. Stores the `payload_hash` and a full `transaction_snapshot` for replay. Document ID format prevents cross-tenant key collisions.
-
-### `products` *(read from Inventory)*
-Read-only in this module. Queried to validate product existence, store ownership, and `quantity_on_hand` before any write.
+Stores one record per unique `store_id + idempotency_key` with `request_hash`, `transaction_id`, `result_status`, `response_snapshot`, `created_at`, and `last_seen_at`.
 
 ### `stock_adjustments`
-One `SALE_DEDUCTION` record written per line item, referencing the `transaction_id` as `source_ref`. Shares the same collection as the Inventory module audit trail.
-
----
-
-## Execution Flow
-
-```
-POST /api/v1/billing/transactions
-  │
-  ├── 1. Validate request payload (Pydantic)
-  │
-  ├── 2. Check billing_idempotency for idempotency_key
-  │       ├── Key exists + same payload hash  → return stored result (HTTP 200)
-  │       └── Key exists + different hash      → raise 409 CONFLICT
-  │
-  ├── 3. Batch-fetch all requested products from Firestore (read-only)
-  │
-  ├── 4. Validate product existence and store ownership
-  │       └── Any missing / wrong-store product → raise 404
-  │
-  ├── 5. Validate stock for ALL items
-  │       └── Any item insufficient → raise 400, NO writes performed
-  │
-  └── 6. Open single Firestore atomic transaction:
-          ├── Write  → transactions/{transaction_id}
-          ├── Update → products/{id}.quantity_on_hand    (one per line item)
-          ├── Write  → stock_adjustments/{adj_id}         (one per line item)
-          └── Write  → billing_idempotency/{store_id}::{key}
-      → HTTP 201
-```
-
----
+Stores one `SALE_DEDUCTION` row per billed line item.
 
 ## Business Rules Enforced
 
-- **Strictly atomic** — Firestore's `async with db.transaction()` wraps all four write types. Any failure triggers an automatic full rollback; partial writes are impossible by design.
-- **All-or-nothing stock validation** — all products are fetched and all quantities checked *before* the Firestore transaction opens. A single item with insufficient stock rejects the entire request with `400`.
-- **No write on stock failure** — `create_billing_transaction()` is never called if stock validation fails. This is verified by a dedicated mock-assertion test.
-- **Mandatory idempotency** — `idempotency_key` is a required field. Callers that retry a request on network failure with the same key receive the original result safely without double-charging or double-deducting stock.
-- **Payload hashing** — the idempotency record stores a SHA-256 hash of `items` (sorted by `product_id` for order-stability). A different hash on the same key raises `409 IDEMPOTENCY_KEY_CONFLICT`.
-- **Tenant-scoped idempotency** — document IDs in `billing_idempotency` are `{store_id}::{idempotency_key}`, ensuring keys are fully isolated per store.
-- **Audit trail** — one `SALE_DEDUCTION` record is written to `stock_adjustments` per line item, with `source_ref` set to the `transaction_id` for full traceability.
-- **Module isolation** — billing reads the `products` Firestore collection directly. It does not import or call any Python code from the Inventory module, preserving clean module boundaries.
+- Billing is strictly atomic.
+- No partial stock deduction is allowed.
+- Same `idempotency_key` plus same payload returns a safe replay.
+- Same `idempotency_key` plus different payload returns `409 IDEMPOTENCY_KEY_CONFLICT`.
+- Insufficient stock returns `409 INSUFFICIENT_STOCK`.
+- Product lookup is store-scoped and returns `404 PRODUCT_NOT_FOUND` when missing.
+- Duplicate line items are aggregated for stock validation before commit.
+- Stock is revalidated inside the Firestore transaction before product quantities are updated.
 
----
+## Architecture Notes
 
-## Architecture Decisions
-
-- **Pre-computation before the transaction** — all document IDs, timestamps, line totals, and hashes are computed in Python before the Firestore transaction opens. This keeps the transaction body minimal and reduces the risk of contention timeouts.
-- **`db.get_all()` for batch product reads** — avoids N serial `document.get()` calls; Firestore fetches all requested product documents in a single RPC.
-- **Idempotent replay short-circuits early** — on a confirmed replay, the service returns immediately from the stored `transaction_snapshot` without opening a Firestore transaction or touching any collection.
-- **`line_total` computed server-side** — `quantity * unit_price` is computed and stored on the server; callers cannot pass a pre-computed total.
-
----
+- Billing logic stays centralized in one service path.
+- Firestore document writes remain isolated in the repository layer.
+- Billing reads live inventory data from the shared `products` collection and writes billing outputs to `transactions`, `stock_adjustments`, and `billing_idempotency`.
 
 ## Test Coverage
 
-| Test Class | Scenarios Covered |
-|------------|-------------------|
-| `TestCreateTransactionSuccess` | 201 happy path, `request_id` in envelope, full body shape, `status=COMPLETED`, correct `total_amount`, auth guard → 401, empty `items` → 400, missing `idempotency_key` → 400, `quantity=0` → 400 |
-| `TestInsufficientStock` | Single item over-request → 400, error envelope shape, `insufficient_items` in `details`, Firestore write mock never called, missing product → 404 |
-| `TestIdempotency` | Replay → HTTP 200, replay returns original `transaction_id`, write not called on replay, conflicting payload → 409, 409 follows error envelope, `error.code = CONFLICT` |
+Billing tests cover:
 
-**Result: 19 / 19 tests passing.**
+- successful transaction creation
+- auth and payload validation failures
+- insufficient stock with zero writes
+- missing product handling
+- idempotent replay
+- idempotency conflict
+- list pagination
+- fetch-one transaction behavior
