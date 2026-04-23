@@ -76,20 +76,34 @@ async def trigger_sync(*, store_id: str) -> dict:
     # Guard: PIPELINE_ALREADY_RUNNING (api_contracts.md §9)
     active = await repository.get_active_run_for_store(db, store_id=store_id)
     if active:
-        raise ConflictError(
+        e = ConflictError(
             "A pipeline run is already active for this store.",
-            details={
-                "error_code": "PIPELINE_ALREADY_RUNNING",
-                "active_pipeline_run_id": active.get("pipeline_run_id"),
-            },
+            details={"active_pipeline_run_id": active.get("pipeline_run_id")},
         )
+        e.error_code = "PIPELINE_ALREADY_RUNNING"
+        raise e
 
-    # Fire-and-forget async: the sync runs in the background.
-    # For the API response we return QUEUED immediately.
-    # In production the scheduler triggers jobs via Cloud Run Jobs, not the API.
-    # When triggered via API, we kick off the coroutine in the background.
     import asyncio  # noqa: PLC0415
-    pipeline_run_id = await sync_runner.run_incremental_sync(db, bq, store_id=store_id)
+    
+    # Create the pipeline run record immediately so we have an ID to return
+    # and the active guard works immediately.
+    # We must resolve the window synchronously before firing the background task.
+    from app.modules.data_pipeline import checkpoint_manager
+    checkpoint_start, checkpoint_end = await checkpoint_manager.get_checkpoint_window(db, store_id=store_id)
+    
+    pipeline_run_id = await repository.create_pipeline_run(
+        db,
+        store_id=store_id,
+        run_type="INCREMENTAL_SYNC",
+        checkpoint_start=checkpoint_start,
+        checkpoint_end=checkpoint_end,
+    )
+    
+    # Fire and forget the background task
+    asyncio.create_task(
+        sync_runner.run_incremental_sync(db, bq, store_id=store_id, precreated_run_id=pipeline_run_id, 
+                                         checkpoint_start=checkpoint_start, checkpoint_end=checkpoint_end)
+    )
 
     logger.info(
         "Sync triggered via API",
@@ -114,17 +128,15 @@ async def get_pipeline_run(*, pipeline_run_id: str, store_id: str) -> dict:
     run = await repository.get_pipeline_run(db, pipeline_run_id=pipeline_run_id)
 
     if run is None:
-        raise NotFoundError(
-            f"Pipeline run '{pipeline_run_id}' was not found.",
-            details={"error_code": "PIPELINE_RUN_NOT_FOUND"},
-        )
+        e = NotFoundError(f"Pipeline run '{pipeline_run_id}' was not found.")
+        e.error_code = "PIPELINE_RUN_NOT_FOUND"
+        raise e
 
     # Scope guard: ensure the run belongs to the requesting store
     if run.get("store_id") != store_id:
-        raise NotFoundError(
-            f"Pipeline run '{pipeline_run_id}' was not found.",
-            details={"error_code": "PIPELINE_RUN_NOT_FOUND"},
-        )
+        e = NotFoundError(f"Pipeline run '{pipeline_run_id}' was not found.")
+        e.error_code = "PIPELINE_RUN_NOT_FOUND"
+        raise e
 
     return {
         "pipeline_run": {

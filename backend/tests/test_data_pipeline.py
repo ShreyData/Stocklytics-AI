@@ -84,3 +84,37 @@ async def test_sync_runner_advances_checkpoint_on_success(mock_db, mock_bq):
                         
                         assert run_id == "run_123"
                         mock_success.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_repair_runner_parses_batch_ref_and_overrides_checkpoint(mock_db, mock_bq):
+    """Test that repair_runner extracts batch_ref bounds and passes them to sync_runner."""
+    from app.modules.data_pipeline import repair_runner
+    
+    mock_failures = [{
+        "failure_id": "fail_123",
+        "pipeline_run_id": "run_failed",
+        "batch_ref": "2025-01-01T00:00:00+00:00/2025-01-02T00:00:00+00:00"
+    }]
+    
+    with patch("app.modules.data_pipeline.repository.list_pipeline_failures", new_callable=AsyncMock) as mock_list:
+        mock_list.return_value = mock_failures
+        with patch("app.modules.data_pipeline.repository.mark_failure_reprocessing", new_callable=AsyncMock):
+            with patch("app.modules.data_pipeline.sync_runner.run_incremental_sync", new_callable=AsyncMock) as mock_sync:
+                mock_sync.return_value = "new_run_123"
+                with patch("app.modules.data_pipeline.repository.get_pipeline_run", new_callable=AsyncMock) as mock_get_run:
+                    mock_get_run.return_value = {"status": "SUCCEEDED", "checkpoint_start": datetime(2025, 1, 1, tzinfo=timezone.utc), "checkpoint_end": datetime(2025, 1, 2, tzinfo=timezone.utc)}
+                    with patch("app.modules.data_pipeline.transform_runner.run_mart_refresh", new_callable=AsyncMock):
+                        with patch("app.modules.data_pipeline.repository.mark_failure_recovered", new_callable=AsyncMock):
+                            
+                            res = await repair_runner.run_repair(mock_db, mock_bq, store_id="store_1")
+                            
+                            assert res["recovered"] == 1
+                            assert res["failed"] == 0
+                            
+                            # Verify the checkpoint override was passed properly
+                            mock_sync.assert_called_once()
+                            _, kwargs = mock_sync.call_args
+                            assert "checkpoint_override" in kwargs
+                            start, end = kwargs["checkpoint_override"]
+                            assert start == datetime(2025, 1, 1, tzinfo=timezone.utc)
+                            assert end == datetime(2025, 1, 2, tzinfo=timezone.utc)

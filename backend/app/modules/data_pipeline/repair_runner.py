@@ -59,11 +59,20 @@ async def run_repair(
         await repository.mark_failure_reprocessing(db, failure_id=failure_id)
 
         try:
-            # Re-run incremental sync from the current checkpoint window.
-            # The checkpoint_manager finds the last successful run and resumes from there,
-            # which covers the failed window if no successful run has happened since.
+            # Parse batch_ref to get exact window to replay
+            batch_ref = failure.get("batch_ref", "")
+            override = None
+            if "/" in batch_ref:
+                from datetime import datetime
+                try:
+                    start_str, end_str = batch_ref.split("/", 1)
+                    override = (datetime.fromisoformat(start_str), datetime.fromisoformat(end_str))
+                except ValueError:
+                    logger.warning("Could not parse batch_ref for repair", extra={"batch_ref": batch_ref})
+
+            # Re-run incremental sync from the failed checkpoint window.
             new_sync_run_id = await sync_runner.run_incremental_sync(
-                db, bq, store_id=store_id
+                db, bq, store_id=store_id, checkpoint_override=override
             )
 
             # Retrieve the sync run to check success and get window bounds.
