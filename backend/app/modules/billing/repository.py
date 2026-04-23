@@ -41,6 +41,14 @@ class BillingCommitInsufficientStockError(Exception):
         self.available_quantity = available_quantity
 
 
+class BillingCommitCustomerNotFoundError(Exception):
+    """Raised when a customer cannot be found in the active store during commit."""
+
+    def __init__(self, customer_id: str) -> None:
+        super().__init__(f"Customer '{customer_id}' not found.")
+        self.customer_id = customer_id
+
+
 _db: Optional[firestore.AsyncClient] = None
 
 
@@ -58,6 +66,7 @@ COL_TRANSACTIONS = "transactions"
 COL_IDEMPOTENCY = "billing_idempotency"
 COL_PRODUCTS = "products"
 COL_ADJUSTMENTS = "stock_adjustments"
+COL_CUSTOMERS = "customers"
 
 
 async def get_idempotency_record(
@@ -150,6 +159,7 @@ async def create_billing_transaction(
     inventory_deductions: list[dict[str, Any]],
     adjustment_docs: list[tuple[str, dict[str, Any]]],
     created_at: datetime,
+    customer_summary_update: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Execute a single atomic Firestore transaction for billing.
@@ -211,6 +221,31 @@ async def create_billing_transaction(
             txn.set(
                 db.collection(COL_ADJUSTMENTS).document(adjustment_id),
                 adjustment_doc,
+            )
+
+        if customer_summary_update is not None:
+            customer_id = customer_summary_update["customer_id"]
+            customer_ref = db.collection(COL_CUSTOMERS).document(customer_id)
+            customer_snapshot: DocumentSnapshot = await customer_ref.get(transaction=txn)
+            if not customer_snapshot.exists:
+                raise BillingCommitCustomerNotFoundError(customer_id)
+
+            customer_doc = customer_snapshot.to_dict() or {}
+            if customer_doc.get("store_id") != store_id:
+                raise BillingCommitCustomerNotFoundError(customer_id)
+
+            current_total_spend = float(customer_doc.get("total_spend", 0.0))
+            current_visit_count = int(customer_doc.get("visit_count", 0))
+            sale_amount = float(customer_summary_update["sale_amount"])
+
+            txn.update(
+                customer_ref,
+                {
+                    "total_spend": round(current_total_spend + sale_amount, 2),
+                    "visit_count": current_visit_count + 1,
+                    "last_purchase_at": customer_summary_update["sale_timestamp"],
+                    "updated_at": created_at,
+                },
             )
 
         response_snapshot = {
