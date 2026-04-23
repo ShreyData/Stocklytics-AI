@@ -1,0 +1,179 @@
+"""
+Alerts Module – Repository layer.
+
+Isolates all Firestore read/write operations for alerts.
+The service layer calls only these functions; routes never touch Firestore directly.
+
+Collections:
+    alerts              – current alert state (one document per active condition)
+    alerts/{id}/events  – immutable event log for each lifecycle transition
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Optional
+
+from google.cloud import firestore
+from google.cloud.firestore_v1 import DocumentSnapshot
+
+from app.common.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Firestore client (lazy singleton)
+# ---------------------------------------------------------------------------
+
+_db: Optional[firestore.AsyncClient] = None
+
+
+def _get_db() -> firestore.AsyncClient:
+    """Return a cached Firestore async client, initialising on first call."""
+    global _db
+    if _db is None:
+        settings = get_settings()
+        project = settings.firestore_project_id or None
+        _db = firestore.AsyncClient(project=project)
+    return _db
+
+
+# ---------------------------------------------------------------------------
+# Collection constants
+# ---------------------------------------------------------------------------
+
+ALERTS_COLLECTION = "alerts"
+EVENTS_SUBCOLLECTION = "events"
+
+
+# ---------------------------------------------------------------------------
+# Alert repository functions
+# ---------------------------------------------------------------------------
+
+async def get_alert_by_id(alert_id: str) -> Optional[dict[str, Any]]:
+    """Fetch a single alert by its document ID. Returns None if not found."""
+    db = _get_db()
+    doc: DocumentSnapshot = await db.collection(ALERTS_COLLECTION).document(alert_id).get()
+    if not doc.exists:
+        return None
+    return _snapshot_to_dict(doc)
+
+
+async def get_alert_by_condition(store_id: str, condition_key: str) -> Optional[dict[str, Any]]:
+    """
+    Fetch the open (ACTIVE or ACKNOWLEDGED) alert for a given condition_key.
+    Returns None if no open alert exists.
+    """
+    from app.modules.alerts.schemas import ALERT_STATUS_RESOLVED
+    db = _get_db()
+    query = (
+        db.collection(ALERTS_COLLECTION)
+        .where("store_id", "==", store_id)
+        .where("condition_key", "==", condition_key)
+        .where("status", "!=", ALERT_STATUS_RESOLVED)
+        .limit(1)
+    )
+    
+    docs = [doc async for doc in query.stream()]
+    if not docs:
+        return None
+    return _snapshot_to_dict(docs[0])
+
+
+async def list_alerts(
+    store_id: str,
+    status: Optional[str] = None,
+    alert_type: Optional[str] = None,
+    severity: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Return alerts for a store with optional filters.
+
+    Args:
+        store_id:   Firestore equality filter on store_id.
+        status:     Optional filter by lifecycle status.
+        alert_type: Optional filter by alert type.
+        severity:   Optional filter by severity level.
+    """
+    db = _get_db()
+    query = db.collection(ALERTS_COLLECTION).where("store_id", "==", store_id)
+
+    if status is not None:
+        query = query.where("status", "==", status)
+    if alert_type is not None:
+        query = query.where("alert_type", "==", alert_type)
+    if severity is not None:
+        query = query.where("severity", "==", severity)
+
+    results: list[dict[str, Any]] = []
+    async for doc in query.stream():
+        results.append(_snapshot_to_dict(doc))
+    return results
+
+
+async def create_alert(alert_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Insert a new alert document and return the stored data."""
+    db = _get_db()
+    doc_ref = db.collection(ALERTS_COLLECTION).document(alert_id)
+    await doc_ref.set(data)
+    logger.info("Alert created", extra={"alert_id": alert_id, "store_id": data.get("store_id")})
+    return data
+
+
+async def update_alert(alert_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """
+    Apply a partial update to an alert document.
+
+    Returns the updated document data, or None if the alert does not exist.
+    """
+    db = _get_db()
+    doc_ref = db.collection(ALERTS_COLLECTION).document(alert_id)
+    doc: DocumentSnapshot = await doc_ref.get()
+    if not doc.exists:
+        return None
+    await doc_ref.update(updates)
+    updated_doc: DocumentSnapshot = await doc_ref.get()
+    logger.info("Alert updated", extra={"alert_id": alert_id})
+    return _snapshot_to_dict(updated_doc)
+
+
+async def write_alert_event(
+    alert_id: str,
+    event_id: str,
+    event_data: dict[str, Any],
+) -> None:
+    """
+    Write a lifecycle event document into the alerts/{alert_id}/events subcollection.
+
+    Every status transition must produce one event record per alerts_logic.md §9.
+    """
+    db = _get_db()
+    event_ref = (
+        db.collection(ALERTS_COLLECTION)
+        .document(alert_id)
+        .collection(EVENTS_SUBCOLLECTION)
+        .document(event_id)
+    )
+    await event_ref.set(event_data)
+    logger.info(
+        "Alert event written",
+        extra={
+            "alert_id": alert_id,
+            "event_id": event_id,
+            "to_status": event_data.get("to_status"),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _snapshot_to_dict(snapshot: DocumentSnapshot) -> dict[str, Any]:
+    """Convert a Firestore DocumentSnapshot to a plain dict, injecting the document ID."""
+    data: dict[str, Any] = snapshot.to_dict() or {}  # type: ignore[assignment]
+    # Firestore stores the primary key as the document ID, not a field.
+    if "alert_id" not in data and snapshot.id:
+        data["alert_id"] = snapshot.id
+    return data

@@ -18,6 +18,7 @@ from app.common.exceptions import (
     NotFoundError,
     ValidationError as AppValidationError,
 )
+from app.modules.alerts.engine import evaluate_low_stock
 from app.modules.billing import repository
 from app.modules.billing.schemas import (
     TRANSACTION_STATUS_COMPLETED,
@@ -365,6 +366,29 @@ async def create_transaction(
             "Customer was not found in this store.",
             details={"customer_id": exc.customer_id},
         ) from exc
+
+    # Evaluate LOW_STOCK alerts post-transaction
+    if not stored_response.get("idempotent_replay"):
+        import asyncio
+        inventory_updates = stored_response.get("inventory_updates", [])
+        for update in inventory_updates:
+            prod_id = update.get("product_id")
+            new_qty = update.get("new_quantity_on_hand", 0)
+            product_doc = products.get(prod_id, {})
+            reorder_thresh = int(product_doc.get("reorder_threshold", 0))
+            product_name = product_doc.get("name", "Unknown Product")
+            
+            # Fire asynchronously so we don't block the return, or just await it if needed.
+            # Using asyncio.create_task ensures it doesn't block the API response time significantly.
+            asyncio.create_task(
+                evaluate_low_stock(
+                    store_id=store_id,
+                    product_id=prod_id,
+                    product_name=product_name,
+                    current_stock=new_qty,
+                    reorder_threshold=reorder_thresh
+                )
+            )
 
     logger.info(
         "Billing transaction created",
