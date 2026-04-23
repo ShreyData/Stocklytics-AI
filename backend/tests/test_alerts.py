@@ -156,6 +156,7 @@ class TestListAlerts:
 
         assert response.status_code == 400
         assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "INVALID_QUERY"
 
     def test_list_alerts_invalid_type_filter_returns_400(self):
         """An unrecognised alert_type filter must return 400."""
@@ -170,6 +171,7 @@ class TestListAlerts:
 
         assert response.status_code == 400
         assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "INVALID_QUERY"
 
     def test_list_alerts_invalid_severity_filter_returns_400(self):
         """An unrecognised severity filter must return 400."""
@@ -184,6 +186,29 @@ class TestListAlerts:
 
         assert response.status_code == 400
         assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "INVALID_QUERY"
+
+    def test_list_alerts_contract_shape(self):
+        """List endpoint returns the approved compact alert list shape."""
+        with patch(
+            "app.modules.alerts.service.repository.list_alerts",
+            new_callable=AsyncMock,
+            return_value=[SAMPLE_ALERT_ACTIVE],
+        ):
+            response = client.get("/api/v1/alerts/", headers=AUTH_HEADER)
+
+        item = response.json()["items"][0]
+        assert set(item.keys()) == {
+            "alert_id",
+            "alert_type",
+            "status",
+            "severity",
+            "title",
+            "message",
+            "created_at",
+            "acknowledged_at",
+            "resolved_at",
+        }
 
     def test_list_alerts_valid_status_filter_accepted(self):
         """Valid status=ACTIVE filter must not raise a validation error."""
@@ -346,6 +371,7 @@ class TestAcknowledgeAlert:
 
         assert response.status_code == 409
         assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "INVALID_ALERT_TRANSITION"
 
     def test_acknowledge_resolved_alert_returns_409(self):
         """
@@ -364,6 +390,7 @@ class TestAcknowledgeAlert:
 
         assert response.status_code == 409
         assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "INVALID_ALERT_TRANSITION"
 
     def test_acknowledge_unknown_alert_returns_404(self):
         """Acknowledging a non-existent alert_id must return 404."""
@@ -380,6 +407,7 @@ class TestAcknowledgeAlert:
 
         assert response.status_code == 404
         assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "ALERT_NOT_FOUND"
 
     def test_acknowledge_requires_auth(self):
         """Acknowledge without Bearer token must return 401."""
@@ -525,6 +553,7 @@ class TestResolveAlert:
 
         assert response.status_code == 409
         assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "INVALID_ALERT_TRANSITION"
 
     def test_resolve_unknown_alert_returns_404(self):
         """Resolving a non-existent alert_id must return 404."""
@@ -541,6 +570,7 @@ class TestResolveAlert:
 
         assert response.status_code == 404
         assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "ALERT_NOT_FOUND"
 
     def test_resolve_requires_auth(self):
         """Resolve without Bearer token must return 401."""

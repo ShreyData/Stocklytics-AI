@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from app.modules.alerts.engine import evaluate_low_stock, evaluate_expiry_soon
-from app.modules.alerts.schemas import ALERT_STATUS_ACTIVE, ALERT_STATUS_RESOLVED
+from app.modules.alerts.engine import evaluate_low_stock
+from app.modules.alerts.schemas import ALERT_STATUS_ACTIVE
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ async def test_evaluate_low_stock_creates_alert(mock_repository):
         reorder_threshold=10
     )
     
-    mock_repository.get_alert_by_condition.assert_called_once_with("store_1", "low_stock_prod_1")
+    mock_repository.get_alert_by_condition.assert_called_once_with("store_1", "LOW_STOCK_prod_1")
     mock_repository.create_alert.assert_called_once()
     
     # Verify created alert data
@@ -41,6 +41,8 @@ async def test_evaluate_low_stock_creates_alert(mock_repository):
     assert created_data["alert_type"] == "LOW_STOCK"
     assert created_data["status"] == ALERT_STATUS_ACTIVE
     assert created_data["severity"] == "HIGH"
+    assert created_data["metadata"]["quantity_on_hand"] == 5
+    assert created_data["metadata"]["reorder_threshold"] == 10
     
     mock_repository.write_alert_event.assert_called_once()
 
@@ -66,7 +68,7 @@ async def test_evaluate_low_stock_resolves_existing(mock_repository, mock_resolv
     mock_repository.get_alert_by_condition.return_value = {
         "alert_id": "existing_alert_1",
         "store_id": "store_1",
-        "condition_key": "low_stock_prod_1"
+        "condition_key": "LOW_STOCK_prod_1"
     }
     
     await evaluate_low_stock(
