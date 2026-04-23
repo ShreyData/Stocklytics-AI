@@ -76,19 +76,21 @@ def _safe_int(value: Any) -> Optional[int]:
         return None
 
 
-async def _query_firestore_since(
+async def _query_firestore_window(
     db: firestore.AsyncClient,
     *,
     collection: str,
     store_id: str,
     since: datetime,
+    until: datetime,
     timestamp_field: str = "updated_at",
 ) -> list[dict]:
-    """Return all documents in `collection` for `store_id` updated since `since`."""
+    """Return all documents in `collection` for `store_id` updated between `since` and `until`."""
     query = (
         db.collection(collection)
         .where("store_id", "==", store_id)
         .where(timestamp_field, ">=", since)
+        .where(timestamp_field, "<", until)
     )
     docs = []
     async for doc in query.stream():
@@ -97,6 +99,9 @@ async def _query_firestore_since(
         docs.append(d)
     return docs
 
+
+import io
+import json
 
 def _merge_query(
     bq: bigquery.Client,
@@ -108,22 +113,48 @@ def _merge_query(
     merge_key: str,
 ) -> None:
     """
-    Perform a BigQuery streaming insert (append) for raw tables.
-
-    For MVP we use insert_rows_json; a proper MERGE via temp table is noted
-    as a future improvement once BigQuery MERGE latency is acceptable.
-    Deduplication relies on records_read checkpointing + downstream SQL DISTINCT.
-
-    If rows is empty, this is a no-op.
+    Perform an idempotent BigQuery MERGE.
+    Loads rows into a temporary table, then runs a MERGE statement to upsert.
     """
     if not rows:
         return
+        
     full_table = f"{project}.{dataset}.{table}"
-    errors = bq.insert_rows_json(full_table, rows)
-    if errors:
-        raise RuntimeError(
-            f"BigQuery insert_rows_json errors for {full_table}: {errors}"
-        )
+    temp_table_id = f"{project}.{dataset}.{table}_temp_{uuid.uuid4().hex[:8]}"
+
+    # 1. Load rows into temp table
+    buf = io.StringIO()
+    for row in rows:
+        buf.write(json.dumps(row) + "\n")
+    buf.seek(0)
+    
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        autodetect=True,
+    )
+    load_job = bq.load_table_from_file(buf, temp_table_id, job_config=job_config)
+    load_job.result()  # Wait for load
+
+    try:
+        # 2. Execute MERGE
+        columns = list(rows[0].keys())
+        set_clause = ", ".join(f"T.{col} = S.{col}" for col in columns if col != merge_key)
+        insert_cols = ", ".join(columns)
+        insert_vals = ", ".join(f"S.{col}" for col in columns)
+        
+        sql = f"""
+        MERGE `{full_table}` AS T
+        USING `{temp_table_id}` AS S
+        ON T.{merge_key} = S.{merge_key}
+        WHEN MATCHED THEN
+            UPDATE SET {set_clause}
+        WHEN NOT MATCHED THEN
+            INSERT ({insert_cols}) VALUES ({insert_vals})
+        """
+        bq.query(sql).result()
+    finally:
+        # 3. Cleanup temp table
+        bq.delete_table(temp_table_id, not_found_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +175,13 @@ async def load_transactions_raw(
     Returns (records_read, records_written).
     Firestore `transactions` → `transactions_raw` + `transaction_items_raw`
     """
-    txns = await _query_firestore_since(
+    txns = await _query_firestore_window(
         db,
         collection="transactions",
         store_id=store_id,
         since=checkpoint_start,
-        timestamp_field="updated_at",
+        until=checkpoint_end,
+        timestamp_field="created_at",
     )
 
     project = _settings.bigquery_project_id
@@ -213,11 +245,12 @@ async def load_inventory_snapshot_raw(
 
     Deduplication key: snapshot_id = product_id + captured_at (minute-truncated).
     """
-    products = await _query_firestore_since(
+    products = await _query_firestore_window(
         db,
         collection="products",
         store_id=store_id,
         since=checkpoint_start,
+        until=checkpoint_end,
         timestamp_field="updated_at",
     )
 
@@ -258,11 +291,12 @@ async def load_customers_raw(
     checkpoint_end: datetime,
 ) -> tuple[int, int]:
     """Load changed customer documents into customers_raw."""
-    customers = await _query_firestore_since(
+    customers = await _query_firestore_window(
         db,
         collection="customers",
         store_id=store_id,
         since=checkpoint_start,
+        until=checkpoint_end,
         timestamp_field="updated_at",
     )
 
@@ -301,11 +335,12 @@ async def load_alerts_raw(
     checkpoint_end: datetime,
 ) -> tuple[int, int]:
     """Load changed alert documents into alerts_raw."""
-    alerts = await _query_firestore_since(
+    alerts = await _query_firestore_window(
         db,
         collection="alerts",
         store_id=store_id,
         since=checkpoint_start,
+        until=checkpoint_end,
         timestamp_field="created_at",
     )
 

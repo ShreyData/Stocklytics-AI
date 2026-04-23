@@ -13,7 +13,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Path
 
-from app.common.auth import Role, require_role, get_current_store_id
+from app.common.auth import AuthenticatedUser, require_admin, require_auth
 from app.common.responses import success_response
 from app.modules.data_pipeline import service
 from app.modules.data_pipeline.schemas import PipelineSyncRequest
@@ -21,7 +21,6 @@ from app.modules.data_pipeline.schemas import PipelineSyncRequest
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/pipeline",
     tags=["data_pipeline"],
     responses={404: {"description": "Not found"}},
 )
@@ -34,8 +33,7 @@ router = APIRouter(
 )
 async def trigger_pipeline_sync(
     request: PipelineSyncRequest,
-    _admin=Depends(require_role([Role.ADMIN])),
-    store_id: str = Depends(get_current_store_id),
+    user: AuthenticatedUser = Depends(require_admin),
 ):
     """
     Trigger an incremental sync from Firestore to BigQuery.
@@ -44,14 +42,14 @@ async def trigger_pipeline_sync(
     Returns 202 Accepted and a pipeline_run_id.
     """
     # Enforce request store_id matches authenticated token's store
-    if request.store_id != store_id:
+    if request.store_id != user.store_id:
         from app.common.exceptions import ForbiddenError # noqa: PLC0415
         raise ForbiddenError(
             "Request store_id does not match token scope.",
             details={"error_code": "FORBIDDEN"},
         )
         
-    result = await service.trigger_sync(store_id=store_id)
+    result = await service.trigger_sync(store_id=user.store_id)
     return success_response(result, status_code=202)
 
 
@@ -62,15 +60,14 @@ async def trigger_pipeline_sync(
 )
 async def get_pipeline_run_status(
     pipeline_run_id: str = Path(..., description="ID of the pipeline run to fetch"),
-    _auth=Depends(require_role([Role.ADMIN, Role.MANAGER])),
-    store_id: str = Depends(get_current_store_id),
+    user: AuthenticatedUser = Depends(require_auth),
 ):
     """
     Fetch the status and details of a specific pipeline run.
     """
     result = await service.get_pipeline_run(
         pipeline_run_id=pipeline_run_id,
-        store_id=store_id,
+        store_id=user.store_id,
     )
     return success_response(result, status_code=200)
 
@@ -81,11 +78,10 @@ async def get_pipeline_run_status(
     summary="List Pipeline Failures",
 )
 async def list_pipeline_failures(
-    _admin=Depends(require_role([Role.ADMIN])),
-    store_id: str = Depends(get_current_store_id),
+    user: AuthenticatedUser = Depends(require_admin),
 ):
     """
     List OPEN pipeline failures (dead-letter queue) for the store.
     """
-    result = await service.list_pipeline_failures(store_id=store_id)
+    result = await service.list_pipeline_failures(store_id=user.store_id)
     return success_response(result, status_code=200)

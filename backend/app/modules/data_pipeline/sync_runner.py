@@ -39,6 +39,7 @@ async def run_incremental_sync(
     bq: bigquery.Client,
     *,
     store_id: str,
+    checkpoint_override: tuple[datetime, datetime] | None = None,
 ) -> str:
     """
     Execute the full incremental sync for one store.
@@ -51,9 +52,12 @@ async def run_incremental_sync(
         - checkpoint is NOT advanced.
     """
     # 1. Resolve checkpoint window
-    checkpoint_start, checkpoint_end = await checkpoint_manager.get_checkpoint_window(
-        db, store_id=store_id
-    )
+    if checkpoint_override:
+        checkpoint_start, checkpoint_end = checkpoint_override
+    else:
+        checkpoint_start, checkpoint_end = await checkpoint_manager.get_checkpoint_window(
+            db, store_id=store_id
+        )
 
     # 2. Create the pipeline_run record
     pipeline_run_id = await repository.create_pipeline_run(
