@@ -14,10 +14,10 @@ All code for the `data_pipeline` module has been implemented according to the de
 ## Cross-Module Dependencies Satisfied
 - Verified `app/common/exceptions.py` uses correct HTTP exceptions.
 - Verified `app/common/responses.py` handles consistent JSON payload mapping.
-- Verified `app/common/auth.py` supplies required `Depends(get_current_store_id)` and `require_role`.
+- Verified `app/common/auth.py` role dependencies are integrated via `require_auth` and `require_admin`.
 
 ## Pending Integrations
-- Testing: Need to write `test_data_pipeline.py` specifically focusing on the checkpoint boundaries and failure path mocks.
+- Testing: Added `backend/tests/test_data_pipeline.py` and `backend/tests/test_data_pipeline_e2e.py` for retries, checkpoint behavior, trigger flow, and API error paths.
 - BigQuery Setup: Project infrastructure needs actual BigQuery datasets `retailmind_raw` and `retailmind_mart` initialized in GCP to test the DML queries directly.
 
 ## Deployment Notes

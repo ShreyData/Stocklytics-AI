@@ -39,6 +39,7 @@ async def run_incremental_sync(
     bq: bigquery.Client,
     *,
     store_id: str,
+    precreated_run_id: str | None = None,
     checkpoint_override: tuple[datetime, datetime] | None = None,
 ) -> str:
     """
@@ -59,14 +60,17 @@ async def run_incremental_sync(
             db, store_id=store_id
         )
 
-    # 2. Create the pipeline_run record
-    pipeline_run_id = await repository.create_pipeline_run(
-        db,
-        store_id=store_id,
-        run_type=PIPELINE_RUN_TYPE_INCREMENTAL_SYNC,
-        checkpoint_start=checkpoint_start,
-        checkpoint_end=checkpoint_end,
-    )
+    # 2. Create (or reuse) the pipeline_run record
+    if precreated_run_id:
+        pipeline_run_id = precreated_run_id
+    else:
+        pipeline_run_id = await repository.create_pipeline_run(
+            db,
+            store_id=store_id,
+            run_type=PIPELINE_RUN_TYPE_INCREMENTAL_SYNC,
+            checkpoint_start=checkpoint_start,
+            checkpoint_end=checkpoint_end,
+        )
 
     logger.info(
         "Sync runner started",

@@ -25,7 +25,6 @@ from app.common.exceptions import ConflictError, NotFoundError
 from app.modules.data_pipeline import repository, sync_runner
 from app.modules.data_pipeline.schemas import (
     PIPELINE_RUN_STATUS_QUEUED,
-    PIPELINE_RUN_STATUS_RUNNING,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,11 +98,27 @@ async def trigger_sync(*, store_id: str) -> dict:
         checkpoint_end=checkpoint_end,
     )
     
-    # Fire and forget the background task
-    asyncio.create_task(
-        sync_runner.run_incremental_sync(db, bq, store_id=store_id, precreated_run_id=pipeline_run_id, 
-                                         checkpoint_start=checkpoint_start, checkpoint_end=checkpoint_end)
+    # Fire and forget the background task.
+    task = asyncio.create_task(
+        sync_runner.run_incremental_sync(
+            db,
+            bq,
+            store_id=store_id,
+            precreated_run_id=pipeline_run_id,
+            checkpoint_override=(checkpoint_start, checkpoint_end),
+        )
     )
+
+    def _log_task_error(done_task: asyncio.Task) -> None:
+        try:
+            done_task.result()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Background sync task failed",
+                extra={"pipeline_run_id": pipeline_run_id, "store_id": store_id},
+            )
+
+    task.add_done_callback(_log_task_error)
 
     logger.info(
         "Sync triggered via API",
