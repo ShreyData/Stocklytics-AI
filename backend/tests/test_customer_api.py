@@ -22,6 +22,7 @@ def mock_repo():
         mock_repo_instance.get_customer_by_phone = AsyncMock()
         mock_repo_instance.create_customer = AsyncMock()
         mock_repo_instance.get_customer_by_id = AsyncMock()
+        mock_repo_instance.list_customers = AsyncMock()
         mock_repo_instance.get_purchase_history = AsyncMock()
         
         yield mock_repo_instance
@@ -92,6 +93,32 @@ class TestCustomerAPI:
         assert body["customer"]["customer_id"] == "cust_123"
         assert body["customer"]["total_spend"] == 120.50
 
+    def test_list_customers_success(self, mock_repo):
+        """GET /customers -> returns list contract for active store"""
+        mock_repo.list_customers.return_value = [
+            {
+                "customer_id": "cust_123",
+                "store_id": "store_001",
+                "name": "Jane Doe",
+                "phone": "555-0100",
+                "total_spend": 120.50,
+                "visit_count": 2,
+                "last_purchase_at": datetime.now(timezone.utc),
+            }
+        ]
+
+        response = client.get(
+            "/api/v1/customers",
+            headers=AUTH_HEADER
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "items" in body
+        assert len(body["items"]) == 1
+        assert body["items"][0]["customer_id"] == "cust_123"
+        mock_repo.list_customers.assert_called_once_with("store_001")
+
     def test_get_purchase_history_contract_enforced(self, mock_repo):
         """GET /customers/{customer_id}/purchase-history -> exact contract mapped"""
         # Service checks customer exists first
@@ -156,10 +183,10 @@ class TestCustomerAPI:
         
         assert response.status_code == 409
         body = response.json()
-        assert body["error"]["code"] == "CONFLICT"
+        assert body["error"]["code"] == "CUSTOMER_ALREADY_EXISTS"
 
     def test_create_customer_store_scope_violation(self, mock_repo):
-        """Token store_id != request.store_id -> 403 Forbidden"""
+        """Token store_id != request.store_id -> 400 Invalid Request"""
         response = client.post(
             "/api/v1/customers",
             headers=AUTH_HEADER,
@@ -170,9 +197,9 @@ class TestCustomerAPI:
             }
         )
         
-        assert response.status_code == 403
+        assert response.status_code == 400
         body = response.json()
-        assert body["error"]["code"] == "FORBIDDEN"
+        assert body["error"]["code"] == "INVALID_REQUEST"
 
     def test_get_customer_not_found(self, mock_repo):
         """Customer not found -> 404"""
@@ -185,7 +212,7 @@ class TestCustomerAPI:
         
         assert response.status_code == 404
         body = response.json()
-        assert body["error"]["code"] == "NOT_FOUND"
+        assert body["error"]["code"] == "CUSTOMER_NOT_FOUND"
 
     def test_get_customer_scope_violation(self, mock_repo):
         """Customer belongs to a different store -> 404 Not Found (privacy)"""
@@ -201,4 +228,4 @@ class TestCustomerAPI:
         )
         
         assert response.status_code == 404
-        assert response.json()["error"]["code"] == "NOT_FOUND"
+        assert response.json()["error"]["code"] == "CUSTOMER_NOT_FOUND"

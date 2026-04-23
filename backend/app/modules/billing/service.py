@@ -47,6 +47,12 @@ class BillingTransactionNotFoundError(NotFoundError):
     error_code = "TRANSACTION_NOT_FOUND"
 
 
+class BillingCustomerNotFoundError(NotFoundError):
+    """Raised when a customer cannot be found in the active store."""
+
+    error_code = "CUSTOMER_NOT_FOUND"
+
+
 class IdempotencyKeyConflictError(ConflictError):
     """Raised when the same idempotency key is reused with a different payload."""
 
@@ -302,6 +308,14 @@ async def create_transaction(
         "created_at": now,
     }
 
+    customer_summary_update: Optional[dict[str, Any]] = None
+    if payload.customer_id:
+        customer_summary_update = {
+            "customer_id": payload.customer_id,
+            "sale_amount": total_amount,
+            "sale_timestamp": sale_timestamp,
+        }
+
     response_transaction = {
         "transaction_id": transaction_id,
         "store_id": store_id,
@@ -326,6 +340,7 @@ async def create_transaction(
             inventory_deductions=inventory_deductions,
             adjustment_docs=adjustment_docs,
             created_at=now,
+            customer_summary_update=customer_summary_update,
         )
     except repository.BillingCommitProductNotFoundError as exc:
         raise BillingProductNotFoundError(
@@ -344,6 +359,11 @@ async def create_transaction(
                     }
                 ]
             },
+        ) from exc
+    except repository.BillingCommitCustomerNotFoundError as exc:
+        raise BillingCustomerNotFoundError(
+            "Customer was not found in this store.",
+            details={"customer_id": exc.customer_id},
         ) from exc
 
     logger.info(
