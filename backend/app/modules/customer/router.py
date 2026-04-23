@@ -8,7 +8,7 @@ Base path: /api/v1/customers
 from fastapi import APIRouter, Depends
 
 from app.common.auth import AuthenticatedUser, require_auth
-from app.common.exceptions import ForbiddenError
+from app.common.exceptions import ValidationError
 from app.common.responses import success_response
 from app.modules.customer.schemas import CustomerCreateRequest
 from app.modules.customer.service import CustomerService
@@ -22,7 +22,10 @@ async def create_customer(
     user: AuthenticatedUser = Depends(require_auth),
 ):
     if req.store_id != user.store_id:
-        raise ForbiddenError("Store ID mismatch")
+        raise ValidationError(
+            "store_id in request must match authenticated store scope.",
+            details={"request_store_id": req.store_id, "auth_store_id": user.store_id},
+        )
         
     customer = await customer_service.create_customer(req)
     return success_response({"customer": customer}, status_code=201)
