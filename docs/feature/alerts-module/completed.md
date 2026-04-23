@@ -15,10 +15,15 @@ The Alerts Module detects and surfaces urgent store conditions (low stock, expir
 | File | Purpose |
 |------|---------|
 | `app/modules/alerts/schemas.py` | Pydantic request/response models, lifecycle status constants, allowed transition map |
-| `app/modules/alerts/repository.py` | All Firestore reads/writes for `alerts` collection and `alerts/{alert_id}/events` subcollection |
+| `app/modules/alerts/repository.py` | All Firestore reads/writes for `alerts` collection and `alerts/{alert_id}/events` subcollection, plus `get_alert_by_condition` |
 | `app/modules/alerts/service.py` | Business logic — list, summary, acknowledge, resolve, lifecycle validation, event writing |
+| `app/modules/alerts/engine.py` | Business logic — core rule evaluation for `LOW_STOCK` and `EXPIRY_SOON`, orchestrates lifecycle state transitions |
 | `app/modules/alerts/router.py` | Thin FastAPI route handlers delegating to the service layer (replaced stub) |
+| `app/modules/billing/service.py` | Added post-transaction hook to fire `LOW_STOCK` evaluation asynchronously |
+| `app/modules/inventory/service.py` | Added post-adjustment hook to fire `LOW_STOCK` evaluation asynchronously |
+| `scripts/run_alerts_sweep.py` | CLI script for Cloud Run Jobs to trigger hourly (`LOW_STOCK`) and daily (`EXPIRY_SOON`) evaluation sweeps |
 | `tests/test_alerts.py` | 28 unit tests with all Firestore I/O fully mocked |
+| `tests/test_alerts_engine.py` | Unit tests for engine evaluation logic |
 
 ---
 

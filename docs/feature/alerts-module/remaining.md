@@ -7,35 +7,35 @@ The items below are pending and depend on other modules or scheduled infrastruct
 
 ## 1. Alert Engine — Condition Detection (depends on Inventory + Billing + Analytics)
 
-The service layer exposes `repository.create_alert()` and `repository.update_alert()` but no automatic trigger currently calls them. The following rule-evaluation jobs need to be built:
+The service layer exposes an `engine.py` component to run evaluations. The following rule-evaluation jobs are implemented:
 
-| Rule | Trigger Mode | Dependency |
-|------|-------------|------------|
-| `LOW_STOCK` (real-time) | After successful billing deduction or manual stock removal | Billing Module post-hook |
-| `LOW_STOCK` (scheduled) | Hourly reconciliation sweep | Cloud Run Job / scheduler |
-| `EXPIRY_SOON` | Daily — products expiring within 7 days with stock > 0 | Inventory Module + scheduler |
-| `NOT_SELLING` | Daily — products with stock > 0 and no sales in last 14 days | Analytics Module refresh |
-| `HIGH_DEMAND` | Every 15 minutes — 3-day sales rate ≥ 1.5x baseline or stock cover < 3 days | Analytics Module refresh |
+| Rule | Trigger Mode | Dependency | Status |
+|------|-------------|------------|--------|
+| `LOW_STOCK` (real-time) | After successful billing deduction or manual stock removal | Billing Module post-hook | ~~Done~~ |
+| `LOW_STOCK` (scheduled) | Hourly reconciliation sweep | Cloud Run Job / scheduler | ~~Done~~ |
+| `EXPIRY_SOON` | Daily — products expiring within 7 days with stock > 0 | Inventory Module + scheduler | ~~Done~~ |
+| `NOT_SELLING` | Daily — products with stock > 0 and no sales in last 14 days | Analytics Module refresh | Pending |
+| `HIGH_DEMAND` | Every 15 minutes — 3-day sales rate ≥ 1.5x baseline or stock cover < 3 days | Analytics Module refresh | Pending |
 
-Implementation notes:
-- Each job must build one `condition_key` per rule and source entity.
-- If no open (non-resolved) alert exists for that `condition_key`, create a new `ACTIVE` alert.
-- If an open alert already exists, update `message`, `severity`, and `last_evaluated_at`.
-- If the condition clears, call the resolve path with `resolved_by = "system"`.
+Implementation notes (implemented):
+- Each job builds one `condition_key` per rule and source entity.
+- If no open (non-resolved) alert exists for that `condition_key`, creates a new `ACTIVE` alert.
+- If an open alert already exists, updates `message`, `severity`, and `last_evaluated_at`.
+- If the condition clears, calls the resolve path with `resolved_by = "system"`.
 
 ---
 
 ## 2. Billing Module Integration
 
-- Wire `LOW_STOCK` real-time trigger: after `billing.service` successfully commits a billing transaction, call the alert engine to evaluate stock levels for all sold products.
-- This must happen **after** the atomic Firestore transaction commits — not inside it.
+- ~~Wire `LOW_STOCK` real-time trigger: after `billing.service` successfully commits a billing transaction, call the alert engine to evaluate stock levels for all sold products.~~ (Completed)
+- ~~This must happen **after** the atomic Firestore transaction commits — not inside it.~~ (Completed)
 
 ---
 
 ## 3. Inventory Module Integration
 
-- Connect stock adjustment post-hooks: after a manual `REMOVE` or `SALE_DEDUCTION` adjustment, evaluate `LOW_STOCK` for the affected product.
-- Connect daily expiry sweep: after the daily health job runs, evaluate `EXPIRY_SOON` for all products in the store.
+- ~~Connect stock adjustment post-hooks: after a manual `REMOVE` or `SALE_DEDUCTION` adjustment, evaluate `LOW_STOCK` for the affected product.~~ (Completed)
+- ~~Connect daily expiry sweep: after the daily health job runs, evaluate `EXPIRY_SOON` for all products in the store.~~ (Completed - implemented via standalone `run_alerts_sweep.py`)
 
 ---
 
@@ -55,12 +55,12 @@ Implementation notes:
 
 ## 6. Scheduled Jobs Infrastructure
 
-- Create Cloud Run Job definitions (or Cloud Scheduler triggers) for:
-  - Hourly `LOW_STOCK` sweep
-  - Daily `EXPIRY_SOON` sweep
-  - Daily `NOT_SELLING` sweep
-  - 15-minute `HIGH_DEMAND` sweep
-- Jobs should call internal service functions, not go through the HTTP API.
+- ~~Create Cloud Run Job definitions (or Cloud Scheduler triggers) for:~~ (Completed via `run_alerts_sweep.py` script)
+  - ~~Hourly `LOW_STOCK` sweep~~
+  - ~~Daily `EXPIRY_SOON` sweep~~
+  - Daily `NOT_SELLING` sweep (Pending)
+  - 15-minute `HIGH_DEMAND` sweep (Pending)
+- Jobs should call internal service functions, not go through the HTTP API. (Implemented via python CLI)
 
 ---
 

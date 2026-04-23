@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 from app.common.exceptions import NotFoundError, ValidationError as AppValidationError
+from app.modules.alerts.engine import evaluate_low_stock
 from app.modules.inventory import repository
 from app.modules.inventory.schemas import (
     EXPIRY_STATUS_EXPIRED,
@@ -314,6 +315,26 @@ async def apply_stock_adjustment(
             "new_quantity": new_quantity,
         },
     )
+
+    # Fetch product details to evaluate alert condition
+    try:
+        import asyncio
+        product_data = await repository.get_product_by_id(product_id)
+        if product_data:
+            reorder_thresh = int(product_data.get("reorder_threshold", 0))
+            product_name = product_data.get("name", "Unknown Product")
+            asyncio.create_task(
+                evaluate_low_stock(
+                    store_id=store_id,
+                    product_id=product_id,
+                    product_name=product_name,
+                    current_stock=new_quantity,
+                    reorder_threshold=reorder_thresh
+                )
+            )
+    except Exception as e:
+        logger.error(f"Failed to trigger LOW_STOCK alert evaluation: {e}")
+
     return {
         "product_id": product_id,
         "new_quantity_on_hand": new_quantity,
