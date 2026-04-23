@@ -35,6 +35,18 @@ from app.modules.alerts.schemas import (
 logger = logging.getLogger(__name__)
 
 
+class AlertNotFoundError(NotFoundError):
+    """Raised when an alert does not exist in the active store scope."""
+
+    error_code = "ALERT_NOT_FOUND"
+
+
+class InvalidAlertTransitionError(ConflictError):
+    """Raised when an alert lifecycle transition is not allowed."""
+
+    error_code = "INVALID_ALERT_TRANSITION"
+
+
 # ---------------------------------------------------------------------------
 # Serialisation helper
 # ---------------------------------------------------------------------------
@@ -55,6 +67,42 @@ def _firestore_to_response(data: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def _to_alert_list_item(alert: dict[str, Any]) -> dict[str, Any]:
+    """Return the contract-shaped payload for GET /alerts list items."""
+    return {
+        "alert_id": alert.get("alert_id"),
+        "alert_type": alert.get("alert_type"),
+        "status": alert.get("status"),
+        "severity": alert.get("severity"),
+        "title": alert.get("title"),
+        "message": alert.get("message"),
+        "created_at": alert.get("created_at"),
+        "acknowledged_at": alert.get("acknowledged_at"),
+        "resolved_at": alert.get("resolved_at"),
+    }
+
+
+def _to_acknowledge_response(alert: dict[str, Any]) -> dict[str, Any]:
+    """Return the contract-shaped payload for acknowledge responses."""
+    return {
+        "alert_id": alert.get("alert_id"),
+        "status": alert.get("status"),
+        "acknowledged_at": alert.get("acknowledged_at"),
+        "acknowledged_by": alert.get("acknowledged_by"),
+    }
+
+
+def _to_resolve_response(alert: dict[str, Any]) -> dict[str, Any]:
+    """Return the contract-shaped payload for resolve responses."""
+    return {
+        "alert_id": alert.get("alert_id"),
+        "status": alert.get("status"),
+        "resolved_at": alert.get("resolved_at"),
+        "resolved_by": alert.get("resolved_by"),
+        "resolution_note": alert.get("resolution_note"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +142,7 @@ async def list_alerts(
         alert_type=alert_type,
         severity=severity,
     )
-    return [_firestore_to_response(a) for a in alerts]
+    return [_to_alert_list_item(_firestore_to_response(alert)) for alert in alerts]
 
 
 async def get_alerts_summary(store_id: str) -> dict[str, Any]:
@@ -170,7 +218,7 @@ async def acknowledge_alert(
     }
     updated = await repository.update_alert(alert_id, updates)
     if updated is None:
-        raise NotFoundError(
+        raise AlertNotFoundError(
             f"Alert '{alert_id}' disappeared during update.",
             details={"alert_id": alert_id},
         )
@@ -188,7 +236,7 @@ async def acknowledge_alert(
         "Alert acknowledged",
         extra={"alert_id": alert_id, "user_id": user_id, "store_id": store_id},
     )
-    return _firestore_to_response(updated)
+    return _to_acknowledge_response(_firestore_to_response(updated))
 
 
 async def resolve_alert(
@@ -224,7 +272,7 @@ async def resolve_alert(
     }
     updated = await repository.update_alert(alert_id, updates)
     if updated is None:
-        raise NotFoundError(
+        raise AlertNotFoundError(
             f"Alert '{alert_id}' disappeared during update.",
             details={"alert_id": alert_id},
         )
@@ -242,7 +290,7 @@ async def resolve_alert(
         "Alert resolved",
         extra={"alert_id": alert_id, "user_id": user_id, "store_id": store_id},
     )
-    return _firestore_to_response(updated)
+    return _to_resolve_response(_firestore_to_response(updated))
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +305,7 @@ async def _fetch_and_validate_alert(alert_id: str, store_id: str) -> dict[str, A
     """
     alert = await repository.get_alert_by_id(alert_id)
     if alert is None or alert.get("store_id") != store_id:
-        raise NotFoundError(
+        raise AlertNotFoundError(
             f"Alert '{alert_id}' not found.",
             details={"alert_id": alert_id},
         )
@@ -272,13 +320,12 @@ def _validate_transition(alert_id: str, from_status: str, to_status: str) -> Non
     """
     allowed = ALLOWED_TRANSITIONS.get(from_status, set())
     if to_status not in allowed:
-        raise ConflictError(
+        raise InvalidAlertTransitionError(
             f"Cannot transition alert from '{from_status}' to '{to_status}'.",
             details={
                 "alert_id": alert_id,
                 "current_status": from_status,
                 "requested_status": to_status,
-                "error_code": "INVALID_ALERT_TRANSITION",
             },
         )
 

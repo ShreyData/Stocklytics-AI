@@ -6,7 +6,7 @@ This document summarises all work completed on the `feature/alerts-module` branc
 
 ## Overview
 
-The Alerts Module detects and surfaces urgent store conditions (low stock, expiring products, slow-moving items, and high-demand spikes). It manages the full alert lifecycle — from detection through acknowledgement to resolution — and makes alert data available to both the frontend UI and the AI assistant.
+The Alerts Module detects and surfaces urgent store conditions for `LOW_STOCK` and `EXPIRY_SOON` in this phase. It manages the full alert lifecycle — from detection through acknowledgement to resolution — and makes alert data available to both the frontend UI and the AI assistant.
 
 ---
 
@@ -49,7 +49,7 @@ All endpoints require a valid Firebase Bearer token. Responses always include `r
 | `severity` | string | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` | none |
 | `store_id` | string | Must match authenticated store scope | none |
 
-Invalid enum values return `400 INVALID_REQUEST`.
+Invalid enum values return `400 INVALID_QUERY`.
 
 ---
 
@@ -73,15 +73,15 @@ ACKNOWLEDGED --> RESOLVED (user or system resolves)
 ```
 
 - `RESOLVED` is a terminal state — no further transitions are permitted.
-- Attempting any transition out of `RESOLVED` returns `409 CONFLICT`.
-- Attempting to acknowledge an `ACKNOWLEDGED` or `RESOLVED` alert returns `409 CONFLICT`.
+- Attempting any transition out of `RESOLVED` returns `409 INVALID_ALERT_TRANSITION`.
+- Attempting to acknowledge an `ACKNOWLEDGED` or `RESOLVED` alert returns `409 INVALID_ALERT_TRANSITION`.
 - Only `ACTIVE` alerts can be acknowledged.
 
 ---
 
 ## Business Rules Enforced
 
-- **Lifecycle validation** — `_validate_transition()` in `service.py` enforces `ALLOWED_TRANSITIONS` map and raises `409 CONFLICT` on invalid moves.
+- **Lifecycle validation** — `_validate_transition()` in `service.py` enforces `ALLOWED_TRANSITIONS` map and raises `409 INVALID_ALERT_TRANSITION` on invalid moves.
 - **Event logging** — every status transition calls `repository.write_alert_event()`, writing an immutable record to `alerts/{alert_id}/events`.
 - **Store scoping** — `store_id` in request body and query params is always validated against the authenticated token scope.
 - **Timestamps stamped at transition** — `acknowledged_at` / `resolved_at` are set in the service at the moment the action is processed, never client-supplied.
@@ -104,9 +104,9 @@ ACKNOWLEDGED --> RESOLVED (user or system resolves)
 
 | Scenario | HTTP | Code |
 |----------|------|------|
-| Alert not found or wrong store | `404` | `NOT_FOUND` |
-| Invalid lifecycle transition | `409` | `CONFLICT` |
-| Invalid query param enum value | `400` | `INVALID_REQUEST` |
+| Alert not found or wrong store | `404` | `ALERT_NOT_FOUND` |
+| Invalid lifecycle transition | `409` | `INVALID_ALERT_TRANSITION` |
+| Invalid query param enum value | `400` | `INVALID_QUERY` |
 | `store_id` mismatch | `400` | `INVALID_REQUEST` |
 | Missing Bearer token | `401` | `UNAUTHORIZED` |
 
@@ -114,7 +114,7 @@ ACKNOWLEDGED --> RESOLVED (user or system resolves)
 
 ## Test Coverage
 
-**Result: 28 tests, 28 passed, 0 failed**
+**Result: 29 tests defined**
 
 | Test Class | Scenarios Covered |
 |------------|-------------------|
