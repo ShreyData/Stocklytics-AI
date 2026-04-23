@@ -14,6 +14,7 @@ import logging
 from fastapi import APIRouter, Depends, Path
 
 from app.common.auth import AuthenticatedUser, require_admin, require_auth
+from app.common.exceptions import ForbiddenError
 from app.common.responses import success_response
 from app.modules.data_pipeline import service
 from app.modules.data_pipeline.schemas import PipelineSyncRequest
@@ -65,6 +66,12 @@ async def get_pipeline_run_status(
     """
     Fetch the status and details of a specific pipeline run.
     """
+    if user.role not in {"admin", "manager"}:
+        raise ForbiddenError(
+            "This action requires admin or manager role.",
+            details={"required_roles": ["admin", "manager"], "actual_role": user.role},
+        )
+
     result = await service.get_pipeline_run(
         pipeline_run_id=pipeline_run_id,
         store_id=user.store_id,
