@@ -1,15 +1,31 @@
 import asyncio
 from typing import Any, Dict, List, Optional
+
 from google.cloud import bigquery, firestore
+
 from app.common.config import get_settings
 
 class AnalyticsRepository:
     def __init__(self):
         settings = get_settings()
-        self.db = firestore.AsyncClient(project=settings.firestore_project_id)
-        self.bq = bigquery.Client(project=settings.bigquery_project_id)
+        self.firestore_project_id = settings.firestore_project_id
+        self.bigquery_project_id = settings.bigquery_project_id
         self.dataset = settings.bigquery_dataset_mart
         self.project = settings.bigquery_project_id
+        self._db: Optional[firestore.AsyncClient] = None
+        self._bq: Optional[bigquery.Client] = None
+
+    @property
+    def db(self) -> firestore.AsyncClient:
+        if self._db is None:
+            self._db = firestore.AsyncClient(project=self.firestore_project_id or None)
+        return self._db
+
+    @property
+    def bq(self) -> bigquery.Client:
+        if self._bq is None:
+            self._bq = bigquery.Client(project=self.bigquery_project_id or None)
+        return self._bq
 
     async def get_analytics_metadata(self, store_id: str) -> Optional[Dict[str, Any]]:
         doc_ref = self.db.collection("analytics_metadata").document(f"{store_id}_dashboard")
@@ -46,15 +62,39 @@ class AnalyticsRepository:
             }
         return None
 
-    async def get_sales_trends(self, store_id: str) -> List[Dict[str, Any]]:
-        query = f"""
-            SELECT CAST(sales_date AS STRING) as label, total_sales as sales_amount, transaction_count as transactions
-            FROM `{self.project}.{self.dataset}.sales_daily`
-            WHERE store_id = @store_id
-            ORDER BY sales_date DESC
-            LIMIT 30
-        """
-        params = [bigquery.ScalarQueryParameter("store_id", "STRING", store_id)]
+    async def get_sales_trends(
+        self,
+        store_id: str,
+        range_days: int = 30,
+        granularity: str = "daily",
+    ) -> List[Dict[str, Any]]:
+        if granularity == "weekly":
+            query = f"""
+                SELECT
+                    CAST(DATE_TRUNC(sales_date, WEEK(MONDAY)) AS STRING) AS label,
+                    SUM(total_sales) AS sales_amount,
+                    SUM(transaction_count) AS transactions
+                FROM `{self.project}.{self.dataset}.sales_daily`
+                WHERE store_id = @store_id
+                  AND sales_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @range_days DAY)
+                GROUP BY label
+                ORDER BY label DESC
+            """
+        else:
+            query = f"""
+                SELECT
+                    CAST(sales_date AS STRING) AS label,
+                    total_sales AS sales_amount,
+                    transaction_count AS transactions
+                FROM `{self.project}.{self.dataset}.sales_daily`
+                WHERE store_id = @store_id
+                  AND sales_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @range_days DAY)
+                ORDER BY sales_date DESC
+            """
+        params = [
+            bigquery.ScalarQueryParameter("store_id", "STRING", store_id),
+            bigquery.ScalarQueryParameter("range_days", "INT64", range_days),
+        ]
         rows = await asyncio.to_thread(self._run_query, query, params)
         # Return ascending for charts
         formatted_rows = [
