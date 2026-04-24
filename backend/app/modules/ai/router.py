@@ -20,6 +20,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from app.common.auth import AuthenticatedUser, require_auth
+from app.common.exceptions import ValidationError
 from app.common.responses import success_response
 from app.modules.ai.schemas import ChatRequest
 from app.modules.ai.service import AIService
@@ -41,8 +42,18 @@ async def post_chat(
     - Error 503 AI_CONTEXT_NOT_READY: analytics metadata not available.
     - Error 503 AI_PROVIDER_ERROR: Gemini API call failed.
     """
+    if body.store_id != user.store_id:
+        raise ValidationError(
+            "store_id in request must match authenticated store scope.",
+            details={
+                "request_store_id": body.store_id,
+                "auth_store_id": user.store_id,
+            },
+        )
+
     result = await _service.chat(
         store_id=user.store_id,
+        user_id=user.user_id,
         chat_session_id=body.chat_session_id,
         query=body.query,
     )
@@ -61,5 +72,8 @@ async def get_chat_session(
     - Returns: ordered list of user and assistant messages.
     - Error 404 CHAT_SESSION_NOT_FOUND: the session ID does not exist.
     """
-    result = await _service.get_session_history(chat_session_id=chat_session_id)
+    result = await _service.get_session_history(
+        store_id=user.store_id,
+        chat_session_id=chat_session_id,
+    )
     return success_response(result, status_code=200)

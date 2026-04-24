@@ -32,6 +32,42 @@ MOCK_METADATA = {
     "freshness_status": "fresh",
 }
 
+MOCK_ANALYTICS_CONTEXT = {
+    "dashboard_summary": {
+        "snapshot_date": "2026-04-02",
+        "today_sales": 12450.0,
+        "today_transactions": 81,
+        "active_alert_count": 3,
+        "low_stock_count": 2,
+        "top_selling_product": "Rice 5kg",
+        "analytics_last_updated_at": "2026-04-02T10:45:00Z",
+    },
+    "sales_trends": [
+        {
+            "sales_date": "2026-04-02",
+            "total_sales": 12450.0,
+            "transaction_count": 81,
+            "average_basket_value": 153.7,
+        },
+        {
+            "sales_date": "2026-04-01",
+            "total_sales": 11800.0,
+            "transaction_count": 77,
+            "average_basket_value": 153.2,
+        },
+    ],
+    "product_performance": [
+        {
+            "product_id": "prod_biscuit_01",
+            "product_name": "Biscuit Pack",
+            "quantity_sold": 12,
+            "revenue": 240.0,
+            "sales_date": "2026-04-02",
+        }
+    ],
+    "customer_insights": [],
+}
+
 MOCK_ALERTS = [
     {
         "alert_id": "alert_013",
@@ -71,9 +107,11 @@ class TestPostChat:
     def test_returns_200_with_answer(self):
         with (
             patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),
-            patch("app.modules.ai.repository.get_active_alerts_snapshot", new_callable=AsyncMock, return_value=MOCK_ALERTS),
+            patch("app.modules.ai.repository.get_relevant_alerts_snapshot", new_callable=AsyncMock, return_value=MOCK_ALERTS),
             patch("app.modules.ai.repository.get_inventory_snapshot", new_callable=AsyncMock, return_value=MOCK_INVENTORY),
+            patch("app.modules.ai.repository.get_analytics_context", new_callable=AsyncMock, return_value=MOCK_ANALYTICS_CONTEXT),
             patch("app.modules.ai.service._get_gemini_model", return_value=_mock_gemini()),
+            patch("app.modules.ai.repository.get_chat_session", new_callable=AsyncMock, return_value=None),
             patch("app.modules.ai.repository.ensure_chat_session", new_callable=AsyncMock),
             patch("app.modules.ai.repository.append_message", new_callable=AsyncMock),
         ):
@@ -91,9 +129,11 @@ class TestPostChat:
     def test_returns_grounding_metadata(self):
         with (
             patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),
-            patch("app.modules.ai.repository.get_active_alerts_snapshot", new_callable=AsyncMock, return_value=MOCK_ALERTS),
+            patch("app.modules.ai.repository.get_relevant_alerts_snapshot", new_callable=AsyncMock, return_value=MOCK_ALERTS),
             patch("app.modules.ai.repository.get_inventory_snapshot", new_callable=AsyncMock, return_value=MOCK_INVENTORY),
+            patch("app.modules.ai.repository.get_analytics_context", new_callable=AsyncMock, return_value=MOCK_ANALYTICS_CONTEXT),
             patch("app.modules.ai.service._get_gemini_model", return_value=_mock_gemini()),
+            patch("app.modules.ai.repository.get_chat_session", new_callable=AsyncMock, return_value=None),
             patch("app.modules.ai.repository.ensure_chat_session", new_callable=AsyncMock),
             patch("app.modules.ai.repository.append_message", new_callable=AsyncMock),
         ):
@@ -108,9 +148,11 @@ class TestPostChat:
         stale_metadata = {**MOCK_METADATA, "freshness_status": "stale"}
         with (
             patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=stale_metadata),
-            patch("app.modules.ai.repository.get_active_alerts_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_relevant_alerts_snapshot", new_callable=AsyncMock, return_value=[]),
             patch("app.modules.ai.repository.get_inventory_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_analytics_context", new_callable=AsyncMock, return_value=MOCK_ANALYTICS_CONTEXT),
             patch("app.modules.ai.service._get_gemini_model", return_value=_mock_gemini()),
+            patch("app.modules.ai.repository.get_chat_session", new_callable=AsyncMock, return_value=None),
             patch("app.modules.ai.repository.ensure_chat_session", new_callable=AsyncMock),
             patch("app.modules.ai.repository.append_message", new_callable=AsyncMock),
         ):
@@ -129,8 +171,9 @@ class TestPostChat:
     def test_returns_503_when_gemini_fails(self):
         with (
             patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),
-            patch("app.modules.ai.repository.get_active_alerts_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_relevant_alerts_snapshot", new_callable=AsyncMock, return_value=[]),
             patch("app.modules.ai.repository.get_inventory_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_analytics_context", new_callable=AsyncMock, return_value=MOCK_ANALYTICS_CONTEXT),
             patch("app.modules.ai.service._get_gemini_model", side_effect=Exception("Gemini timeout")),
         ):
             response = client.post("/api/v1/ai/chat", json=VALID_PAYLOAD, headers=AUTH_HEADER)
@@ -142,23 +185,53 @@ class TestPostChat:
         response = client.post("/api/v1/ai/chat", json=VALID_PAYLOAD)
         assert response.status_code == 401
 
+    def test_rejects_store_scope_mismatch(self):
+        bad_payload = {**VALID_PAYLOAD, "store_id": "store_other"}
+        response = client.post("/api/v1/ai/chat", json=bad_payload, headers=AUTH_HEADER)
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
     def test_rejects_empty_query(self):
         bad_payload = {**VALID_PAYLOAD, "query": ""}
         response = client.post("/api/v1/ai/chat", json=bad_payload, headers=AUTH_HEADER)
         assert response.status_code == 400
 
-    def test_persists_messages_to_session(self):
-        append_mock = AsyncMock()
+    def test_returns_503_when_analytics_summary_missing(self):
+        empty_context = {
+            "dashboard_summary": None,
+            "sales_trends": [],
+            "product_performance": [],
+            "customer_insights": [],
+        }
         with (
             patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),
-            patch("app.modules.ai.repository.get_active_alerts_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_relevant_alerts_snapshot", new_callable=AsyncMock, return_value=[]),
             patch("app.modules.ai.repository.get_inventory_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_analytics_context", new_callable=AsyncMock, return_value=empty_context),
+        ):
+            response = client.post("/api/v1/ai/chat", json=VALID_PAYLOAD, headers=AUTH_HEADER)
+
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "AI_CONTEXT_NOT_READY"
+
+    def test_persists_messages_to_session(self):
+        append_mock = AsyncMock()
+        ensure_session_mock = AsyncMock()
+        with (
+            patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),
+            patch("app.modules.ai.repository.get_relevant_alerts_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_inventory_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_analytics_context", new_callable=AsyncMock, return_value=MOCK_ANALYTICS_CONTEXT),
             patch("app.modules.ai.service._get_gemini_model", return_value=_mock_gemini()),
-            patch("app.modules.ai.repository.ensure_chat_session", new_callable=AsyncMock),
+            patch("app.modules.ai.repository.get_chat_session", new_callable=AsyncMock, return_value=None),
+            patch("app.modules.ai.repository.ensure_chat_session", ensure_session_mock),
             patch("app.modules.ai.repository.append_message", append_mock),
         ):
             client.post("/api/v1/ai/chat", json=VALID_PAYLOAD, headers=AUTH_HEADER)
 
+        assert ensure_session_mock.await_count == 1
+        assert ensure_session_mock.await_args.kwargs["store_id"] == "store_001"
+        assert ensure_session_mock.await_args.kwargs["user_id"] == "dev_user_001"
         # Should be called twice: once for user message, once for assistant message
         assert append_mock.await_count == 2
         roles = [call.kwargs["role"] for call in append_mock.await_args_list]
@@ -188,6 +261,14 @@ class TestGetChatSession:
     def test_returns_404_for_missing_session(self):
         with patch("app.modules.ai.repository.get_chat_session", new_callable=AsyncMock, return_value=None):
             response = client.get("/api/v1/ai/chat/sessions/chat_missing", headers=AUTH_HEADER)
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "CHAT_SESSION_NOT_FOUND"
+
+    def test_returns_404_for_session_from_other_store(self):
+        other_store_session = {"store_id": "store_other", "chat_session_id": "chat_001"}
+        with patch("app.modules.ai.repository.get_chat_session", new_callable=AsyncMock, return_value=other_store_session):
+            response = client.get("/api/v1/ai/chat/sessions/chat_001", headers=AUTH_HEADER)
 
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "CHAT_SESSION_NOT_FOUND"
