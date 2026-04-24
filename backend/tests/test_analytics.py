@@ -66,6 +66,33 @@ class TestAnalyticsAPI:
         body = response.json()
         assert body["points"] == mock_trends
 
+    def test_sales_trends_invalid_range_returns_400_invalid_query(self):
+        response = client.get(
+            "/api/v1/analytics/sales-trends?range=5d",
+            headers=AUTH_HEADER,
+        )
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "INVALID_QUERY"
+
+    def test_sales_trends_invalid_granularity_returns_400_invalid_query(self):
+        response = client.get(
+            "/api/v1/analytics/sales-trends?granularity=monthly",
+            headers=AUTH_HEADER,
+        )
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "INVALID_QUERY"
+
+    def test_sales_trends_store_scope_mismatch_returns_400_invalid_query(self):
+        response = client.get(
+            "/api/v1/analytics/sales-trends?store_id=store_999",
+            headers=AUTH_HEADER,
+        )
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "INVALID_QUERY"
+
     def test_product_performance_success(self):
         mock_items = [{"product_id": "p1", "product_name": "A", "quantity_sold": 10, "revenue": 100.0}]
         with (
