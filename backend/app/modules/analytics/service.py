@@ -1,12 +1,18 @@
 from typing import Any, Dict
 
-from app.common.exceptions import ServiceUnavailableError
+from app.common.exceptions import ServiceUnavailableError, ValidationError
 from app.modules.analytics.repository import AnalyticsRepository
 
 
 class AnalyticsNotReadyError(ServiceUnavailableError):
     """Raised when analytics metadata or mart data is not ready."""
     error_code = "ANALYTICS_NOT_READY"
+
+
+class InvalidAnalyticsQueryError(ValidationError):
+    """Raised when analytics query parameters are invalid."""
+
+    error_code = "INVALID_QUERY"
 
 
 class AnalyticsService:
@@ -50,9 +56,34 @@ class AnalyticsService:
         response["summary"] = summary
         return response
 
-    async def get_sales_trends(self, store_id: str) -> Dict[str, Any]:
+    async def get_sales_trends(
+        self,
+        store_id: str,
+        range_value: str = "30d",
+        granularity: str = "daily",
+    ) -> Dict[str, Any]:
+        allowed_ranges = {"7d": 7, "30d": 30, "90d": 90}
+        allowed_granularities = {"daily", "weekly"}
+        if range_value not in allowed_ranges:
+            raise InvalidAnalyticsQueryError(
+                "Invalid `range` value.",
+                details={"range": range_value, "allowed": sorted(allowed_ranges.keys())},
+            )
+        if granularity not in allowed_granularities:
+            raise InvalidAnalyticsQueryError(
+                "Invalid `granularity` value.",
+                details={
+                    "granularity": granularity,
+                    "allowed": sorted(allowed_granularities),
+                },
+            )
+
         metadata = await self._get_metadata_or_raise(store_id)
-        points = await self.repo.get_sales_trends(store_id)
+        points = await self.repo.get_sales_trends(
+            store_id=store_id,
+            range_days=allowed_ranges[range_value],
+            granularity=granularity,
+        )
         
         response = self._format_freshness(metadata)
         response["points"] = points

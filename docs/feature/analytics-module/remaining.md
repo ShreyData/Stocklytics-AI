@@ -1,4 +1,4 @@
 # Analytics Module - Remaining Tasks
 
-- [ ] Add explicit parameter limits/ranges validation.
 - [ ] Verify BigQuery timezone formatting edge cases on the frontend.
+- [ ] Add stale and delayed freshness integration examples in frontend and AI handoff tests.
