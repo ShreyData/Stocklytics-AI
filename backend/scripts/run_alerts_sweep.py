@@ -15,7 +15,12 @@ import sys
 from google.cloud import firestore
 
 from app.common.config import get_settings
-from app.modules.alerts.engine import evaluate_low_stock, evaluate_expiry_soon
+from app.modules.alerts.engine import (
+    evaluate_expiry_soon,
+    evaluate_high_demand_for_store,
+    evaluate_low_stock,
+    evaluate_not_selling_for_store,
+)
 
 # Configure basic logging for the script
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -88,13 +93,43 @@ async def run_daily_sweep():
     logger.info(f"Finished daily sweep. Evaluated {len(products)} products.")
 
 
+async def run_not_selling_sweep():
+    """Evaluate NOT_SELLING conditions per store."""
+    logger.info("Starting daily NOT_SELLING sweep...")
+    products = await get_all_products()
+    store_ids = {str(p.get("store_id")) for p in products if p.get("store_id")}
+
+    for store_id in store_ids:
+        await evaluate_not_selling_for_store(store_id=store_id)
+
+    logger.info(f"Finished NOT_SELLING sweep. Evaluated {len(store_ids)} stores.")
+
+
+async def run_high_demand_sweep():
+    """Evaluate HIGH_DEMAND conditions per store."""
+    logger.info("Starting 15-minute HIGH_DEMAND sweep...")
+    products = await get_all_products()
+    store_ids = {str(p.get("store_id")) for p in products if p.get("store_id")}
+
+    for store_id in store_ids:
+        await evaluate_high_demand_for_store(store_id=store_id)
+
+    logger.info(f"Finished HIGH_DEMAND sweep. Evaluated {len(store_ids)} stores.")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Run Alerts Sweep")
     parser.add_argument(
         "--sweep-type",
-        choices=["hourly", "daily"],
+        choices=["hourly", "daily", "not-selling", "high-demand"],
         required=True,
-        help="The type of sweep to run. 'hourly' evaluates LOW_STOCK, 'daily' evaluates EXPIRY_SOON."
+        help=(
+            "Sweep to run: "
+            "'hourly' (LOW_STOCK), "
+            "'daily' (EXPIRY_SOON), "
+            "'not-selling' (NOT_SELLING), "
+            "'high-demand' (HIGH_DEMAND)."
+        ),
     )
     args = parser.parse_args()
 
@@ -103,6 +138,10 @@ async def main():
             await run_hourly_sweep()
         elif args.sweep_type == "daily":
             await run_daily_sweep()
+        elif args.sweep_type == "not-selling":
+            await run_not_selling_sweep()
+        elif args.sweep_type == "high-demand":
+            await run_high_demand_sweep()
     except Exception as e:
         logger.error(f"Sweep failed: {e}")
         sys.exit(1)

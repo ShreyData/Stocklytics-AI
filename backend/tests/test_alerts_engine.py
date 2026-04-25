@@ -1,7 +1,11 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from app.modules.alerts.engine import evaluate_low_stock
+from app.modules.alerts.engine import (
+    evaluate_high_demand_for_store,
+    evaluate_low_stock,
+    evaluate_not_selling_for_store,
+)
 from app.modules.alerts.schemas import ALERT_STATUS_ACTIVE
 
 
@@ -13,6 +17,8 @@ def mock_repository():
         mock_repo.create_alert = AsyncMock()
         mock_repo.update_alert = AsyncMock()
         mock_repo.write_alert_event = AsyncMock()
+        mock_repo.list_products_for_store = AsyncMock(return_value=[])
+        mock_repo.list_transactions_in_window = AsyncMock(return_value=[])
         yield mock_repo
 
 
@@ -88,3 +94,109 @@ async def test_evaluate_low_stock_resolves_existing(mock_repository, mock_resolv
     )
     mock_repository.create_alert.assert_not_called()
     mock_repository.update_alert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_not_selling_creates_alert_for_in_stock_no_sales(mock_repository):
+    mock_repository.list_products_for_store.return_value = [
+        {"product_id": "prod_1", "name": "Product 1", "quantity_on_hand": 6}
+    ]
+    mock_repository.list_transactions_in_window.return_value = []
+
+    await evaluate_not_selling_for_store(store_id="store_1")
+
+    mock_repository.create_alert.assert_called_once()
+    _, created_data = mock_repository.create_alert.call_args[0]
+    assert created_data["alert_type"] == "NOT_SELLING"
+    assert created_data["condition_key"] == "NOT_SELLING_prod_1"
+    assert created_data["severity"] == "MEDIUM"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_not_selling_resolves_when_sales_exist(mock_repository, mock_resolve_alert):
+    mock_repository.list_products_for_store.return_value = [
+        {"product_id": "prod_1", "name": "Product 1", "quantity_on_hand": 3}
+    ]
+    mock_repository.list_transactions_in_window.return_value = [
+        {
+            "status": "COMPLETED",
+            "items": [{"product_id": "prod_1", "quantity": 1}],
+        }
+    ]
+    mock_repository.get_alert_by_condition.return_value = {
+        "alert_id": "alert_existing_1",
+        "condition_key": "NOT_SELLING_prod_1",
+    }
+
+    await evaluate_not_selling_for_store(store_id="store_1")
+
+    mock_resolve_alert.assert_called_once_with(
+        alert_id="alert_existing_1",
+        store_id="store_1",
+        user_id="system",
+        resolution_note="Condition automatically cleared."
+    )
+    mock_repository.create_alert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_high_demand_creates_alert_on_rate_spike(mock_repository):
+    mock_repository.list_products_for_store.return_value = [
+        {"product_id": "prod_1", "name": "Product 1", "quantity_on_hand": 40}
+    ]
+    # First call = recent window, second call = baseline window.
+    mock_repository.list_transactions_in_window.side_effect = [
+        [{"status": "COMPLETED", "items": [{"product_id": "prod_1", "quantity": 9}]}],   # 3/day
+        [{"status": "COMPLETED", "items": [{"product_id": "prod_1", "quantity": 14}]}],  # 1/day
+    ]
+
+    await evaluate_high_demand_for_store(store_id="store_1")
+
+    mock_repository.create_alert.assert_called_once()
+    _, created_data = mock_repository.create_alert.call_args[0]
+    assert created_data["alert_type"] == "HIGH_DEMAND"
+    assert created_data["condition_key"] == "HIGH_DEMAND_prod_1"
+    assert created_data["severity"] == "HIGH"
+    assert created_data["metadata"]["triggered_by_rate_spike"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_high_demand_creates_alert_on_low_stock_cover(mock_repository):
+    mock_repository.list_products_for_store.return_value = [
+        {"product_id": "prod_1", "name": "Product 1", "quantity_on_hand": 5}
+    ]
+    mock_repository.list_transactions_in_window.side_effect = [
+        [{"status": "COMPLETED", "items": [{"product_id": "prod_1", "quantity": 6}]}],  # recent rate 2/day
+        [],  # no baseline required for stock-cover trigger
+    ]
+
+    await evaluate_high_demand_for_store(store_id="store_1")
+
+    mock_repository.create_alert.assert_called_once()
+    _, created_data = mock_repository.create_alert.call_args[0]
+    assert created_data["metadata"]["triggered_by_stock_cover"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_high_demand_resolves_when_condition_clears(mock_repository, mock_resolve_alert):
+    mock_repository.list_products_for_store.return_value = [
+        {"product_id": "prod_1", "name": "Product 1", "quantity_on_hand": 100}
+    ]
+    mock_repository.list_transactions_in_window.side_effect = [
+        [],  # recent
+        [],  # baseline
+    ]
+    mock_repository.get_alert_by_condition.return_value = {
+        "alert_id": "alert_hd_1",
+        "condition_key": "HIGH_DEMAND_prod_1",
+    }
+
+    await evaluate_high_demand_for_store(store_id="store_1")
+
+    mock_resolve_alert.assert_called_once_with(
+        alert_id="alert_hd_1",
+        store_id="store_1",
+        user_id="system",
+        resolution_note="Condition automatically cleared."
+    )
+    mock_repository.create_alert.assert_not_called()

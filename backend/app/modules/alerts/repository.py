@@ -12,6 +12,7 @@ Collections:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any, Optional
 
 from google.cloud import firestore
@@ -45,6 +46,8 @@ def _get_db() -> firestore.AsyncClient:
 
 ALERTS_COLLECTION = "alerts"
 EVENTS_SUBCOLLECTION = "events"
+PRODUCTS_COLLECTION = "products"
+TRANSACTIONS_COLLECTION = "transactions"
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +167,48 @@ async def write_alert_event(
             "to_status": event_data.get("to_status"),
         },
     )
+
+
+async def list_products_for_store(store_id: str) -> list[dict[str, Any]]:
+    """
+    Return all products for a store.
+
+    Alerts engine applies additional in-memory filters (for example, stock > 0)
+    to keep this repository helper simple and index-safe.
+    """
+    db = _get_db()
+    query = db.collection(PRODUCTS_COLLECTION).where("store_id", "==", store_id)
+
+    results: list[dict[str, Any]] = []
+    async for doc in query.stream():
+        data = doc.to_dict() or {}
+        data.setdefault("product_id", doc.id)
+        results.append(data)
+    return results
+
+
+async def list_transactions_in_window(
+    store_id: str,
+    start_at: datetime,
+    end_at: datetime,
+) -> list[dict[str, Any]]:
+    """
+    Return transactions for a store inside [start_at, end_at] by sale_timestamp.
+    """
+    db = _get_db()
+    query = (
+        db.collection(TRANSACTIONS_COLLECTION)
+        .where("store_id", "==", store_id)
+        .where("sale_timestamp", ">=", start_at)
+        .where("sale_timestamp", "<=", end_at)
+    )
+
+    results: list[dict[str, Any]] = []
+    async for doc in query.stream():
+        data = doc.to_dict() or {}
+        data.setdefault("transaction_id", doc.id)
+        results.append(data)
+    return results
 
 
 # ---------------------------------------------------------------------------
