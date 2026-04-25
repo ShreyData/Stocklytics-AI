@@ -1,277 +1,219 @@
 import { apiClient } from './api';
 import {
-  DashboardSummary,
+  AIChatResponse,
   Alert,
-  Product,
+  AlertsSummary,
   AnalyticsResponse,
+  BillingCreateRequest,
+  BillingCreateResponse,
+  Customer,
+  CustomerCreateRequest,
+  CustomerInsight,
+  DashboardSummary,
+  MeResponse,
+  Product,
   ProductCreateRequest,
+  ProductPerformanceItem,
   ProductUpdateRequest,
+  SalesTrendPoint,
   StockAdjustmentRequest,
 } from './types';
-import { v4 as uuidv4 } from 'uuid';
-
-// ---------------------------------------------------------------------------
-// Config: check if we should force mock mode
-// ---------------------------------------------------------------------------
-
-const USE_MOCKS = process.env.NEXT_PUBLIC_USE_MOCKS === 'true';
-
-// ---------------------------------------------------------------------------
-// Mock data (used when backend modules are stubs or as fallback)
-// ---------------------------------------------------------------------------
-
-const mockDashboardSummary: DashboardSummary = {
-  today_sales: 12450.0,
-  today_transactions: 31,
-  active_alert_count: 6,
-  low_stock_count: 4,
-  top_selling_product: 'Rice 5kg',
-};
-
-const mockProducts: Product[] = [
-  {
-    product_id: 'prod_rice_5kg',
-    store_id: 'store_001',
-    name: 'Rice 5kg',
-    category: 'Groceries',
-    price: 320.0,
-    quantity_on_hand: 25,
-    expiry_date: '2026-06-30T00:00:00Z',
-    reorder_threshold: 8,
-    expiry_status: 'OK',
-    status: 'ACTIVE',
-  },
-  {
-    product_id: 'prod_biscuit_01',
-    store_id: 'store_001',
-    name: 'Biscuit Pack',
-    category: 'Snacks',
-    price: 35.0,
-    quantity_on_hand: 47,
-    expiry_date: '2026-07-10T00:00:00Z',
-    reorder_threshold: 50,
-    expiry_status: 'OK',
-    status: 'ACTIVE',
-  },
-  {
-    product_id: 'prod_milk_1l',
-    store_id: 'store_001',
-    name: 'Milk 1L',
-    category: 'Dairy',
-    price: 60.0,
-    quantity_on_hand: 5,
-    expiry_date: '2026-04-15T00:00:00Z',
-    reorder_threshold: 10,
-    expiry_status: 'EXPIRING_SOON',
-    status: 'ACTIVE',
-  },
-];
-
-const mockAlerts: Alert[] = [
-  {
-    alert_id: 'alert_001',
-    alert_type: 'LOW_STOCK',
-    status: 'ACTIVE',
-    severity: 'HIGH',
-    title: 'Milk 1L stock is low',
-    message: 'Only 5 units left. Reorder soon.',
-    created_at: '2026-04-02T10:31:00Z',
-    source_entity_id: 'prod_milk_1l',
-  },
-  {
-    alert_id: 'alert_013',
-    alert_type: 'NOT_SELLING',
-    status: 'ACTIVE',
-    severity: 'MEDIUM',
-    title: 'Biscuit Pack is not selling',
-    message: 'No sale recorded in the last 14 days.',
-    created_at: '2026-04-01T09:00:00Z',
-    source_entity_id: 'prod_biscuit_01',
-  },
-];
-
-// Simulate network delay for mock calls
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// ---------------------------------------------------------------------------
-// API Service
-// ---------------------------------------------------------------------------
 
 export const apiService = {
   // =========================================================================
-  // INVENTORY — Real API calls (fallback to mocks if backend unavailable)
+  // PLATFORM / AUTH
   // =========================================================================
 
-  getProducts: async (storeId: string): Promise<{ items: Product[] }> => {
-    if (USE_MOCKS) {
-      await delay(500);
-      return { items: mockProducts };
-    }
-    try {
-      const res = await apiClient.get('/inventory/products', {
-        params: { store_id: storeId },
-      });
-      return { items: res.data.items || [] };
-    } catch (error) {
-      console.warn('Backend unavailable for inventory, using mock data', error);
-      await delay(300);
-      return { items: mockProducts };
-    }
+  getMe: async (): Promise<MeResponse> => {
+    const res = await apiClient.get('/me');
+    return res.data;
   },
 
-  getProduct: async (productId: string): Promise<{ product: Product }> => {
-    if (USE_MOCKS) {
-      await delay(300);
-      const product = mockProducts.find((p) => p.product_id === productId);
-      return { product: product || mockProducts[0] };
-    }
-    try {
-      const res = await apiClient.get(`/inventory/products/${productId}`);
-      return { product: res.data.product };
-    } catch (error) {
-      console.warn('Backend unavailable, using mock data', error);
-      const product = mockProducts.find((p) => p.product_id === productId);
-      return { product: product || mockProducts[0] };
-    }
+  // =========================================================================
+  // INVENTORY
+  // =========================================================================
+
+  getProducts: async (
+    storeId: string
+  ): Promise<{ request_id: string; items: Product[]; next_page_token?: string | null }> => {
+    const res = await apiClient.get('/inventory/products', {
+      params: { store_id: storeId },
+    });
+    return {
+      request_id: res.data.request_id,
+      items: res.data.items || [],
+      next_page_token: res.data.next_page_token,
+    };
   },
 
-  createProduct: async (data: ProductCreateRequest): Promise<{ product: Product }> => {
-    if (USE_MOCKS) {
-      await delay(500);
-      const newProduct: Product = {
-        product_id: `prod_${uuidv4().slice(0, 8)}`,
-        store_id: data.store_id,
-        name: data.name,
-        category: data.category,
-        price: data.price,
-        quantity_on_hand: data.quantity,
-        reorder_threshold: data.reorder_threshold,
-        expiry_date: data.expiry_date || null,
-        expiry_status: 'OK',
-        status: data.status || 'ACTIVE',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      mockProducts.push(newProduct);
-      return { product: newProduct };
-    }
+  getProduct: async (
+    productId: string
+  ): Promise<{ request_id: string; product: Product }> => {
+    const res = await apiClient.get(`/inventory/products/${productId}`);
+    return { request_id: res.data.request_id, product: res.data.product };
+  },
+
+  createProduct: async (
+    data: ProductCreateRequest
+  ): Promise<{ request_id: string; product: Product }> => {
     const res = await apiClient.post('/inventory/products', data);
-    return { product: res.data.product };
+    return { request_id: res.data.request_id, product: res.data.product };
   },
 
   updateProduct: async (
     productId: string,
     data: ProductUpdateRequest
-  ): Promise<{ product: Product }> => {
-    if (USE_MOCKS) {
-      await delay(500);
-      const idx = mockProducts.findIndex((p) => p.product_id === productId);
-      if (idx !== -1) {
-        mockProducts[idx] = { ...mockProducts[idx], ...data, updated_at: new Date().toISOString() };
-        return { product: mockProducts[idx] };
-      }
-      throw { code: 'NOT_FOUND', message: 'Product not found' };
-    }
+  ): Promise<{ request_id: string; product: Product }> => {
     const res = await apiClient.patch(`/inventory/products/${productId}`, data);
-    return { product: res.data.product };
+    return { request_id: res.data.request_id, product: res.data.product };
   },
 
   adjustStock: async (
     productId: string,
     data: StockAdjustmentRequest
-  ): Promise<any> => {
-    if (USE_MOCKS) {
-      await delay(500);
-      const product = mockProducts.find((p) => p.product_id === productId);
-      if (product) {
-        if (data.adjustment_type === 'ADD') {
-          product.quantity_on_hand += data.quantity_delta;
-        } else {
-          product.quantity_on_hand = Math.max(0, product.quantity_on_hand - data.quantity_delta);
-        }
-      }
-      return { request_id: uuidv4(), adjustment_id: `adj_${uuidv4().slice(0, 8)}` };
-    }
+  ): Promise<{ request_id: string; adjustment_id: string }> => {
     const res = await apiClient.post(
       `/inventory/products/${productId}/stock-adjustments`,
       data
     );
+    return {
+      request_id: res.data.request_id,
+      adjustment_id: res.data.adjustment_id,
+    };
+  },
+
+  // =========================================================================
+  // BILLING
+  // =========================================================================
+
+  createTransaction: async (
+    data: BillingCreateRequest
+  ): Promise<BillingCreateResponse> => {
+    const res = await apiClient.post('/billing/transactions', data);
     return res.data;
   },
 
   // =========================================================================
-  // ANALYTICS — Mock (backend stub, no endpoints yet)
+  // CUSTOMERS
   // =========================================================================
 
-  getDashboardSummary: async (storeId: string): Promise<AnalyticsResponse<DashboardSummary>> => {
-    await delay(500);
-    return {
-      request_id: uuidv4(),
-      analytics_last_updated_at: new Date().toISOString(),
-      freshness_status: 'fresh',
-      summary: mockDashboardSummary,
-    };
+  getCustomers: async (): Promise<{ request_id: string; items: Customer[] }> => {
+    const res = await apiClient.get('/customers');
+    return { request_id: res.data.request_id, items: res.data.items || [] };
+  },
+
+  createCustomer: async (
+    data: CustomerCreateRequest
+  ): Promise<{ request_id: string; customer: Customer }> => {
+    const res = await apiClient.post('/customers', data);
+    return { request_id: res.data.request_id, customer: res.data.customer };
   },
 
   // =========================================================================
-  // ALERTS — Mock (backend stub, no endpoints yet)
+  // ANALYTICS
   // =========================================================================
 
-  getAlerts: async (storeId: string): Promise<{ items: Alert[] }> => {
-    await delay(500);
-    return { items: mockAlerts };
-  },
-
-  // =========================================================================
-  // BILLING — Mock (backend stub, no endpoints yet)
-  // =========================================================================
-
-  createTransaction: async (data: any): Promise<any> => {
-    await delay(800);
-    const failedItems = data.items.filter((item: any) => {
-      const product = mockProducts.find((p) => p.product_id === item.product_id);
-      return !product || product.quantity_on_hand < item.quantity;
+  getDashboardSummary: async (
+    storeId: string
+  ): Promise<AnalyticsResponse<DashboardSummary>> => {
+    const res = await apiClient.get('/analytics/dashboard', {
+      params: { store_id: storeId },
     });
+    return res.data;
+  },
 
-    if (failedItems.length > 0) {
-      throw {
-        code: 'INSUFFICIENT_STOCK',
-        message: 'One or more products do not have enough stock.',
-        details: { failed_items: failedItems },
-      };
-    }
+  getSalesTrends: async (
+    storeId: string,
+    range: '7d' | '30d' | '90d' = '30d',
+    granularity: 'daily' | 'weekly' = 'daily'
+  ): Promise<AnalyticsResponse<SalesTrendPoint>> => {
+    const res = await apiClient.get('/analytics/sales-trends', {
+      params: { store_id: storeId, range, granularity },
+    });
+    return res.data;
+  },
 
-    return {
-      request_id: uuidv4(),
-      idempotent_replay: false,
-      transaction: {
-        transaction_id: `txn_${uuidv4()}`,
-        status: 'COMPLETED',
-        total_amount: data.items.reduce(
-          (acc: number, item: any) => acc + item.quantity * 100,
-          0
-        ),
-      },
-    };
+  getProductPerformance: async (
+    storeId: string
+  ): Promise<AnalyticsResponse<ProductPerformanceItem>> => {
+    const res = await apiClient.get('/analytics/product-performance', {
+      params: { store_id: storeId },
+    });
+    return res.data;
+  },
+
+  getCustomerInsights: async (
+    storeId: string
+  ): Promise<AnalyticsResponse<CustomerInsight>> => {
+    const res = await apiClient.get('/analytics/customer-insights', {
+      params: { store_id: storeId },
+    });
+    return res.data;
   },
 
   // =========================================================================
-  // AI CHAT — Mock (backend stub, no endpoints yet)
+  // ALERTS
   // =========================================================================
 
-  askAI: async (storeId: string, query: string): Promise<any> => {
-    await delay(1500);
-    return {
-      request_id: uuidv4(),
-      chat_session_id: uuidv4(),
-      analytics_last_updated_at: new Date().toISOString(),
-      freshness_status: 'fresh',
-      answer: `Based on the analytics summary, today's sales are $12,450. The top selling product is Rice 5kg. There is an active alert for Biscuit Pack not selling.`,
-      grounding: {
-        analytics_used: true,
-        alerts_used: ['alert_013'],
-        inventory_products_used: ['prod_rice_5kg', 'prod_biscuit_01'],
-      },
-    };
+  getAlerts: async (
+    storeId: string
+  ): Promise<{ request_id: string; items: Alert[] }> => {
+    const res = await apiClient.get('/alerts', {
+      params: { store_id: storeId },
+    });
+    return { request_id: res.data.request_id, items: res.data.items || [] };
+  },
+
+  getAlertsSummary: async (
+    storeId: string
+  ): Promise<{ request_id: string; summary: AlertsSummary }> => {
+    const res = await apiClient.get('/alerts/summary', {
+      params: { store_id: storeId },
+    });
+    return { request_id: res.data.request_id, summary: res.data.summary };
+  },
+
+  acknowledgeAlert: async (
+    alertId: string,
+    payload: { store_id: string; note?: string }
+  ): Promise<{ request_id: string; alert: Partial<Alert> }> => {
+    const res = await apiClient.post(`/alerts/${alertId}/acknowledge`, payload);
+    return { request_id: res.data.request_id, alert: res.data.alert };
+  },
+
+  resolveAlert: async (
+    alertId: string,
+    payload: { store_id: string; resolution_note?: string }
+  ): Promise<{ request_id: string; alert: Partial<Alert> }> => {
+    const res = await apiClient.post(`/alerts/${alertId}/resolve`, payload);
+    return { request_id: res.data.request_id, alert: res.data.alert };
+  },
+
+  // =========================================================================
+  // AI
+  // =========================================================================
+
+  askAI: async (
+    storeId: string,
+    chatSessionId: string,
+    query: string
+  ): Promise<AIChatResponse> => {
+    const res = await apiClient.post('/ai/chat', {
+      store_id: storeId,
+      chat_session_id: chatSessionId,
+      query,
+    });
+    return res.data;
+  },
+
+  getChatSessionHistory: async (
+    chatSessionId: string
+  ): Promise<{
+    request_id: string;
+    chat_session_id: string;
+    messages: Array<{ role: 'user' | 'assistant'; text: string; created_at: string }>;
+  }> => {
+    const res = await apiClient.get(`/ai/chat/sessions/${chatSessionId}`);
+    return res.data;
   },
 };

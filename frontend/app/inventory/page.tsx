@@ -13,9 +13,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select';
-import {
   Dialog, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -23,6 +20,7 @@ import { Plus, Pencil, PackagePlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
+import { getErrorMessage } from '@/lib/errors';
 
 // ---------------------------------------------------------------------------
 // Add Product Dialog
@@ -63,7 +61,7 @@ function AddProductDialog({
       onOpenChange(false);
       onSuccess();
     } catch (error: any) {
-      toast.error(error.message || 'Failed to create product');
+      toast.error(getErrorMessage(error, 'Failed to create product'));
     } finally {
       setSubmitting(false);
     }
@@ -164,7 +162,7 @@ function EditProductDialog({
       onOpenChange(false);
       onSuccess();
     } catch (error: any) {
-      toast.error(error.message || 'Failed to update product');
+      toast.error(getErrorMessage(error, 'Failed to update product'));
     } finally {
       setSubmitting(false);
     }
@@ -249,7 +247,7 @@ function StockAdjustDialog({
       onOpenChange(false);
       onSuccess();
     } catch (error: any) {
-      toast.error(error.message || 'Failed to adjust stock');
+      toast.error(getErrorMessage(error, 'Failed to adjust stock'));
     } finally {
       setSubmitting(false);
     }
@@ -267,16 +265,20 @@ function StockAdjustDialog({
         <div className="grid gap-4 py-4">
           <div className="space-y-2">
             <Label>Adjustment Type</Label>
-            <Select value={form.adjustment_type} onValueChange={(v) => setForm({ ...form, adjustment_type: v as StockAdjustmentRequest['adjustment_type'] })}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="ADD">Add Stock</SelectItem>
-                <SelectItem value="REMOVE">Remove Stock</SelectItem>
-                <SelectItem value="MANUAL_CORRECTION">Manual Correction</SelectItem>
-              </SelectContent>
-            </Select>
+            <select
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              value={form.adjustment_type}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  adjustment_type: event.target.value as StockAdjustmentRequest['adjustment_type'],
+                })
+              }
+            >
+              <option value="ADD">Add Stock</option>
+              <option value="REMOVE">Remove Stock</option>
+              <option value="MANUAL_CORRECTION">Manual Correction</option>
+            </select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="adj-qty">Quantity</Label>
@@ -314,13 +316,14 @@ export default function Inventory() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
 
   const fetchProducts = useCallback(async () => {
+    if (!storeId) return;
     try {
       setLoading(true);
       const res = await apiService.getProducts(storeId);
       setProducts(res.items);
     } catch (error) {
       console.error('Failed to fetch products', error);
-      toast.error('Failed to load inventory');
+      toast.error(getErrorMessage(error, 'Failed to load inventory'));
     } finally {
       setLoading(false);
     }
