@@ -77,18 +77,32 @@ class CustomerService:
         customers = await self.repo.list_customers(store_id)
         return [self._to_customer_list_item(customer) for customer in customers]
 
-    async def get_customer(self, store_id: str, customer_id: str) -> Dict[str, Any]:
+    async def _ensure_customer_in_store(
+        self,
+        store_id: str,
+        customer_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Fetch customer by id and validate store scope.
+
+        This helper is intentionally used by both profile and purchase-history
+        flows so existence checks do not depend on response-shaping fields.
+        """
         customer = await self.repo.get_customer_by_id(customer_id)
         if not customer or customer.get("store_id") != store_id:
             raise CustomerNotFoundError(
                 "Customer not found in this store.",
                 details={"customer_id": customer_id}
             )
+        return customer
+
+    async def get_customer(self, store_id: str, customer_id: str) -> Dict[str, Any]:
+        customer = await self._ensure_customer_in_store(store_id, customer_id)
         return self._to_customer_response(customer)
 
     async def get_purchase_history(self, store_id: str, customer_id: str) -> List[Dict[str, Any]]:
         # Ensure customer exists first
-        await self.get_customer(store_id, customer_id)
-        
+        await self._ensure_customer_in_store(store_id, customer_id)
+
         history = await self.repo.get_purchase_history(store_id, customer_id)
         return history
