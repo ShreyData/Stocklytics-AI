@@ -27,12 +27,24 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    // Standardized error formatting based on the API contract
-    const formattedError = error.response?.data?.error || {
-      code: error.response?.status === 404 ? 'NOT_FOUND' : 'UNKNOWN_ERROR',
-      message: error.response?.data?.detail || error.message || 'An unknown error occurred.',
-      request_id: error.response?.data?.request_id,
-    };
+    const apiError = error.response?.data?.error;
+    const formattedError = apiError
+      ? {
+          code: apiError.code || 'UNKNOWN_ERROR',
+          message: apiError.message || 'An unknown error occurred.',
+          details: apiError.details,
+          request_id: error.response?.data?.request_id,
+          status: error.response?.status,
+        }
+      : {
+          code: error.response?.status === 404 ? 'NOT_FOUND' : 'UNKNOWN_ERROR',
+          message:
+            error.response?.data?.detail ||
+            error.message ||
+            'An unknown error occurred.',
+          request_id: error.response?.data?.request_id,
+          status: error.response?.status,
+        };
     return Promise.reject(formattedError);
   }
 );

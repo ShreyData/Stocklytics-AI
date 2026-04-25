@@ -1,60 +1,81 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { apiService } from '@/lib/api-service';
+import { UserProfile } from '@/lib/types';
+
+const AUTH_TOKEN_KEY = 'auth_token';
 
 interface AuthContextType {
+  user: UserProfile | null;
   storeId: string;
-  setStoreId: (id: string) => void;
   isAuthenticated: boolean;
-  login: (token: string, storeId: string) => void;
+  isLoading: boolean;
+  login: (token: string) => Promise<void>;
   logout: () => void;
+  refreshSession: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [storeId, setStoreId] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('store_id') || 'store_001';
-    }
-    return 'store_001';
-  });
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    // Auto-set dev-token for local development.
-    // The backend accepts "dev-token" as a valid Bearer token
-    // in local environments (see backend/app/common/auth.py).
-    if (typeof window !== 'undefined') {
-      const existingToken = localStorage.getItem('auth_token');
-      if (!existingToken) {
-        localStorage.setItem('auth_token', 'dev-token');
+  const hydrateSession = useCallback(async (options?: { throwOnError?: boolean }) => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem(AUTH_TOKEN_KEY) : null;
+    if (!token) {
+      setUser(null);
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      const res = await apiService.getMe();
+      setUser(res.user);
+    } catch (error) {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
       }
-      const existingStore = localStorage.getItem('store_id');
-      if (!existingStore) {
-        localStorage.setItem('store_id', 'store_001');
+      setUser(null);
+      if (options?.throwOnError) {
+        throw error;
       }
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
-  const login = (token: string, newStoreId: string) => {
-    localStorage.setItem('auth_token', token);
-    localStorage.setItem('store_id', newStoreId);
-    setStoreId(newStoreId);
-    setIsAuthenticated(true);
-  };
+  useEffect(() => {
+    hydrateSession();
+  }, [hydrateSession]);
 
-  const logout = () => {
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('store_id');
-    setIsAuthenticated(false);
-  };
+  const login = useCallback(async (token: string) => {
+    if (!token.trim()) {
+      throw new Error('Token is required.');
+    }
+    setIsLoading(true);
+    localStorage.setItem(AUTH_TOKEN_KEY, token.trim());
+    await hydrateSession({ throwOnError: true });
+  }, [hydrateSession]);
 
-  return (
-    <AuthContext.Provider value={{ storeId, setStoreId, isAuthenticated, login, logout }}>
-      {children}
-    </AuthContext.Provider>
-  );
+  const logout = useCallback(() => {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    setUser(null);
+    setIsLoading(false);
+  }, []);
+
+  const value = useMemo<AuthContextType>(() => ({
+    user,
+    storeId: user?.store_id || '',
+    isAuthenticated: Boolean(user),
+    isLoading,
+    login,
+    logout,
+    refreshSession: hydrateSession,
+  }), [user, isLoading, login, logout, hydrateSession]);
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {

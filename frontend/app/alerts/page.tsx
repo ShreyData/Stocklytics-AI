@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AppLayout } from '@/components/app-layout';
 import { apiService } from '@/lib/api-service';
 import { useAuth } from '@/components/auth-provider';
@@ -11,38 +11,60 @@ import { Button } from '@/components/ui/button';
 import { AlertTriangle, CheckCircle2, Clock } from 'lucide-react';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
+import { getErrorMessage } from '@/lib/errors';
 
 export default function Alerts() {
   const { storeId } = useAuth();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
 
-  useEffect(() => {
-    const fetchAlerts = async () => {
-      try {
-        const res = await apiService.getAlerts(storeId);
-        setAlerts(res.items);
-      } catch (error) {
-        toast.error('Failed to load alerts');
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchAlerts();
+  const fetchAlerts = useCallback(async () => {
+    if (!storeId) return;
+    try {
+      setLoading(true);
+      const res = await apiService.getAlerts(storeId);
+      setAlerts(res.items);
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to load alerts.'));
+    } finally {
+      setLoading(false);
+    }
   }, [storeId]);
 
-  const handleAcknowledge = (alertId: string) => {
-    setAlerts((prev) =>
-      prev.map((a) => (a.alert_id === alertId ? { ...a, status: 'ACKNOWLEDGED' } : a))
-    );
-    toast.success('Alert acknowledged');
+  useEffect(() => {
+    fetchAlerts();
+  }, [fetchAlerts]);
+
+  const withActionLoading = async (
+    alertId: string,
+    action: () => Promise<void>
+  ) => {
+    setActionLoading((prev) => ({ ...prev, [alertId]: true }));
+    try {
+      await action();
+      await fetchAlerts();
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to update alert.'));
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [alertId]: false }));
+    }
   };
 
-  const handleResolve = (alertId: string) => {
-    setAlerts((prev) =>
-      prev.map((a) => (a.alert_id === alertId ? { ...a, status: 'RESOLVED' } : a))
-    );
-    toast.success('Alert resolved');
+  const handleAcknowledge = async (alertId: string) => {
+    if (!storeId) return;
+    await withActionLoading(alertId, async () => {
+      await apiService.acknowledgeAlert(alertId, { store_id: storeId });
+      toast.success('Alert acknowledged');
+    });
+  };
+
+  const handleResolve = async (alertId: string) => {
+    if (!storeId) return;
+    await withActionLoading(alertId, async () => {
+      await apiService.resolveAlert(alertId, { store_id: storeId });
+      toast.success('Alert resolved');
+    });
   };
 
   return (
@@ -81,6 +103,7 @@ export default function Alerts() {
                       variant="outline"
                       className="flex-1"
                       onClick={() => handleAcknowledge(alert.alert_id)}
+                      disabled={Boolean(actionLoading[alert.alert_id])}
                     >
                       <Clock className="w-4 h-4 mr-2" />
                       Acknowledge
@@ -90,6 +113,7 @@ export default function Alerts() {
                     <Button
                       className="flex-1"
                       onClick={() => handleResolve(alert.alert_id)}
+                      disabled={Boolean(actionLoading[alert.alert_id])}
                     >
                       <CheckCircle2 className="w-4 h-4 mr-2" />
                       Resolve

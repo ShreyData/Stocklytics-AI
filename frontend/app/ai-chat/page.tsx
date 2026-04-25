@@ -10,6 +10,8 @@ import { Button } from '@/components/ui/button';
 import { FreshnessBadge } from '@/components/freshness-badge';
 import { Send, Bot, User, AlertTriangle, Package, BarChart3 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { getErrorMessage } from '@/lib/errors';
+import { v4 as uuidv4 } from 'uuid';
 
 interface Message {
   id: string;
@@ -31,6 +33,7 @@ export default function AIChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [chatSessionId] = useState(() => `chat_${uuidv4()}`);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -42,7 +45,7 @@ export default function AIChat() {
   }, [messages]);
 
   const handleSend = async () => {
-    if (!input.trim()) return;
+    if (!input.trim() || !storeId) return;
 
     const userMsg: Message = {
       id: Date.now().toString(),
@@ -55,7 +58,7 @@ export default function AIChat() {
     setIsLoading(true);
 
     try {
-      const res = await apiService.askAI(storeId, userMsg.text);
+      const res = await apiService.askAI(storeId, chatSessionId, userMsg.text);
       const aiMsg: Message = {
         id: res.request_id,
         role: 'assistant',
@@ -71,7 +74,7 @@ export default function AIChat() {
       const errorMsg: Message = {
         id: Date.now().toString(),
         role: 'assistant',
-        text: 'Sorry, I encountered an error while processing your request.',
+        text: getErrorMessage(error, 'Sorry, I encountered an error while processing your request.'),
       };
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
@@ -123,7 +126,6 @@ export default function AIChat() {
                       {msg.text}
                     </div>
 
-                    {/* Grounding Footer */}
                     {msg.role === 'assistant' && msg.grounding && (
                       <div className="flex flex-wrap gap-2 mt-2">
                         {msg.grounding.analytics_used && (
@@ -144,8 +146,7 @@ export default function AIChat() {
                       </div>
                     )}
 
-                    {/* Freshness Warning */}
-                    {msg.role === 'assistant' && msg.freshness && msg.freshness.status !== 'fresh' && (
+                    {msg.role === 'assistant' && msg.freshness && (
                       <div className="mt-2">
                         <FreshnessBadge
                           lastUpdatedAt={msg.freshness.lastUpdatedAt}
@@ -186,7 +187,7 @@ export default function AIChat() {
                 disabled={isLoading}
                 className="flex-1"
               />
-              <Button type="submit" disabled={isLoading || !input.trim()}>
+              <Button type="submit" disabled={isLoading || !input.trim() || !storeId}>
                 <Send className="w-4 h-4" />
               </Button>
             </form>
