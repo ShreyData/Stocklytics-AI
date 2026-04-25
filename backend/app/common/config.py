@@ -6,6 +6,8 @@ Central place for all config values. Import this module wherever settings are ne
 import os
 from functools import lru_cache
 
+from app.common.logging_config import configure_logging
+
 
 class Settings:
     """Holds all application configuration values."""
@@ -38,3 +40,13 @@ class Settings:
 def get_settings() -> Settings:
     """Return a cached singleton of Settings."""
     return Settings()
+
+
+def setup_logging() -> None:
+    """
+    Backward-compatible logging bootstrap for scripts.
+
+    Some Cloud Run job entrypoints import setup_logging from this module.
+    Keep this helper as a thin wrapper around the shared logging config.
+    """
+    configure_logging(level=os.getenv("LOG_LEVEL", "INFO"))
