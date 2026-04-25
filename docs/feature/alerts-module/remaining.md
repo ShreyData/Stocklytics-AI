@@ -14,8 +14,8 @@ The service layer exposes an `engine.py` component to run evaluations. The follo
 | `LOW_STOCK` (real-time) | After successful billing deduction or manual stock removal | Billing Module post-hook | ~~Done~~ |
 | `LOW_STOCK` (scheduled) | Hourly reconciliation sweep | Cloud Run Job / scheduler | ~~Done~~ |
 | `EXPIRY_SOON` | Daily — products expiring within 7 days with stock > 0 | Inventory Module + scheduler | ~~Done~~ |
-| `NOT_SELLING` | Daily — products with stock > 0 and no sales in last 14 days | Analytics Module refresh | Pending |
-| `HIGH_DEMAND` | Every 15 minutes — 3-day sales rate ≥ 1.5x baseline or stock cover < 3 days | Analytics Module refresh | Pending |
+| `NOT_SELLING` | Daily — products with stock > 0 and no sales in last 14 days | Scheduled sweep | ~~Done~~ |
+| `HIGH_DEMAND` | Every 15 minutes — 3-day sales rate ≥ 1.5x baseline or stock cover < 3 days | Scheduled sweep | ~~Done~~ |
 
 Implementation notes (implemented):
 - Each job builds one `condition_key` per rule and source entity.
@@ -41,8 +41,8 @@ Implementation notes (implemented):
 
 ## 4. Analytics Module Integration
 
-- Connect `NOT_SELLING` detection: after each analytics pipeline refresh, query products with no recent sales from BigQuery mart and create/update alerts.
-- Connect `HIGH_DEMAND` detection: every 15 minutes after analytics refresh, query products where 3-day sales rate ≥ 1.5x baseline or stock cover < 3 days.
+- Completed by alerts-owned scheduled evaluations that read operational products + transactions data and enforce rule semantics directly.
+- Current behavior does not require synchronous coupling to analytics endpoints; freshness/pipeline lag can still affect when recent sales become visible if upstream writes are delayed.
 
 ---
 
@@ -58,8 +58,8 @@ Implementation notes (implemented):
 - ~~Create Cloud Run Job definitions (or Cloud Scheduler triggers) for:~~ (Completed via `run_alerts_sweep.py` script)
   - ~~Hourly `LOW_STOCK` sweep~~
   - ~~Daily `EXPIRY_SOON` sweep~~
-  - Daily `NOT_SELLING` sweep (Pending)
-  - 15-minute `HIGH_DEMAND` sweep (Pending)
+  - ~~Daily `NOT_SELLING` sweep~~
+  - ~~15-minute `HIGH_DEMAND` sweep~~
 - Jobs should call internal service functions, not go through the HTTP API. (Implemented via python CLI)
 
 ---
