@@ -7,7 +7,8 @@ These functions can be invoked by hooks in other modules or by scheduled sweeps.
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from app.modules.alerts import repository
@@ -181,3 +182,152 @@ async def evaluate_expiry_soon(
         )
     else:
         await _resolve_if_exists(store_id, condition_key)
+
+
+def _sum_units_sold_by_product(transactions: list[dict[str, Any]]) -> dict[str, int]:
+    """
+    Aggregate sold quantity per product_id from transaction item lines.
+    """
+    sold: dict[str, int] = defaultdict(int)
+    for txn in transactions:
+        if txn.get("status") and txn.get("status") != "COMPLETED":
+            continue
+        for item in txn.get("items", []):
+            product_id = item.get("product_id")
+            if not product_id:
+                continue
+            sold[product_id] += int(item.get("quantity", 0))
+    return sold
+
+
+async def evaluate_not_selling_for_store(
+    store_id: str,
+    lookback_days: int = 14,
+) -> None:
+    """
+    Evaluate NOT_SELLING for all in-stock products in a store.
+
+    Rule:
+    - Trigger when quantity_on_hand > 0 and there are no sales in the last N days.
+    - Resolve when product gets new sales or stock becomes 0.
+    """
+    now_utc = datetime.now(timezone.utc)
+    start_utc = now_utc - timedelta(days=lookback_days)
+    transactions = await repository.list_transactions_in_window(
+        store_id=store_id,
+        start_at=start_utc,
+        end_at=now_utc,
+    )
+    sold_by_product = _sum_units_sold_by_product(transactions)
+
+    products = await repository.list_products_for_store(store_id)
+    for product in products:
+        product_id = product.get("product_id")
+        if not product_id:
+            continue
+
+        quantity_on_hand = int(product.get("quantity_on_hand", 0))
+        condition_key = f"NOT_SELLING_{product_id}"
+
+        if quantity_on_hand <= 0:
+            await _resolve_if_exists(store_id, condition_key)
+            continue
+
+        sold_recently = sold_by_product.get(product_id, 0) > 0
+        if sold_recently:
+            await _resolve_if_exists(store_id, condition_key)
+            continue
+
+        product_name = product.get("name", "Unknown Product")
+        await _create_or_update_alert(
+            store_id=store_id,
+            alert_type="NOT_SELLING",
+            condition_key=condition_key,
+            source_entity_id=product_id,
+            severity="MEDIUM",
+            title=f"{product_name} is not selling",
+            message=f"No sales in the last {lookback_days} days while stock is still available.",
+            metadata={
+                "quantity_on_hand": quantity_on_hand,
+                "lookback_days": lookback_days,
+                "recent_sales_units": 0,
+            },
+        )
+
+
+async def evaluate_high_demand_for_store(
+    store_id: str,
+    recent_days: int = 3,
+    baseline_days: int = 14,
+) -> None:
+    """
+    Evaluate HIGH_DEMAND for all products in a store.
+
+    Rule:
+    - Trigger if recent 3-day sales rate >= 1.5x previous baseline rate, OR
+      stock cover is below 3 days.
+    - Resolve when neither condition holds.
+    """
+    now_utc = datetime.now(timezone.utc)
+    recent_start = now_utc - timedelta(days=recent_days)
+    baseline_start = recent_start - timedelta(days=baseline_days)
+
+    recent_txns = await repository.list_transactions_in_window(
+        store_id=store_id,
+        start_at=recent_start,
+        end_at=now_utc,
+    )
+    baseline_txns = await repository.list_transactions_in_window(
+        store_id=store_id,
+        start_at=baseline_start,
+        end_at=recent_start,
+    )
+    recent_sold = _sum_units_sold_by_product(recent_txns)
+    baseline_sold = _sum_units_sold_by_product(baseline_txns)
+
+    products = await repository.list_products_for_store(store_id)
+    for product in products:
+        product_id = product.get("product_id")
+        if not product_id:
+            continue
+
+        quantity_on_hand = int(product.get("quantity_on_hand", 0))
+        recent_units = recent_sold.get(product_id, 0)
+        baseline_units = baseline_sold.get(product_id, 0)
+        recent_rate = recent_units / float(recent_days)
+        baseline_rate = baseline_units / float(baseline_days)
+        stock_cover_days = (quantity_on_hand / recent_rate) if recent_rate > 0 else None
+
+        high_growth = baseline_rate > 0 and recent_rate >= (1.5 * baseline_rate)
+        low_stock_cover = stock_cover_days is not None and stock_cover_days < 3.0
+        condition_key = f"HIGH_DEMAND_{product_id}"
+
+        if not (high_growth or low_stock_cover):
+            await _resolve_if_exists(store_id, condition_key)
+            continue
+
+        product_name = product.get("name", "Unknown Product")
+        reason_text = "sales acceleration and low stock cover" if high_growth and low_stock_cover else (
+            "sales acceleration vs baseline" if high_growth else "low stock cover"
+        )
+        await _create_or_update_alert(
+            store_id=store_id,
+            alert_type="HIGH_DEMAND",
+            condition_key=condition_key,
+            source_entity_id=product_id,
+            severity="HIGH",
+            title=f"{product_name} demand is high",
+            message=f"Recent demand signal detected ({reason_text}).",
+            metadata={
+                "quantity_on_hand": quantity_on_hand,
+                "recent_days": recent_days,
+                "baseline_days": baseline_days,
+                "recent_units_sold": recent_units,
+                "baseline_units_sold": baseline_units,
+                "recent_daily_rate": recent_rate,
+                "baseline_daily_rate": baseline_rate,
+                "stock_cover_days": stock_cover_days,
+                "triggered_by_rate_spike": high_growth,
+                "triggered_by_stock_cover": low_stock_cover,
+            },
+        )
