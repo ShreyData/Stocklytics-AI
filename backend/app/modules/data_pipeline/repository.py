@@ -183,6 +183,7 @@ async def get_last_successful_run(
     db: firestore.AsyncClient,
     *,
     store_id: str,
+    run_type: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Return the most recent SUCCEEDED pipeline_run for this store.
@@ -192,9 +193,10 @@ async def get_last_successful_run(
         db.collection(_COLLECTION_PIPELINE_RUNS)
         .where("store_id", "==", store_id)
         .where("status", "==", PIPELINE_RUN_STATUS_SUCCEEDED)
-        .order_by("finished_at", direction=firestore.Query.DESCENDING)
-        .limit(1)
     )
+    if run_type is not None:
+        query = query.where("run_type", "==", run_type)
+    query = query.order_by("finished_at", direction=firestore.Query.DESCENDING).limit(1)
     async for doc in query.stream():
         return doc.to_dict()
     return None
@@ -279,6 +281,17 @@ async def mark_failure_reprocessing(
     """Mark a failure as REPROCESSING when repair job picks it up."""
     await db.collection(_COLLECTION_PIPELINE_FAILURES).document(failure_id).update(
         {"dead_letter_status": "REPROCESSING"}
+    )
+
+
+async def mark_failure_open(
+    db: firestore.AsyncClient,
+    *,
+    failure_id: str,
+) -> None:
+    """Move a failure back to OPEN so it can be retried by a later repair run."""
+    await db.collection(_COLLECTION_PIPELINE_FAILURES).document(failure_id).update(
+        {"dead_letter_status": DEAD_LETTER_STATUS_OPEN}
     )
 
 
