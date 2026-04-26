@@ -76,7 +76,7 @@ async def test_sync_runner_advances_checkpoint_on_success(mock_db, mock_bq):
         with patch("app.modules.data_pipeline.repository.create_pipeline_run", new_callable=AsyncMock) as mock_create:
             mock_create.return_value = "run_123"
             with patch("app.modules.data_pipeline.repository.update_pipeline_run_running", new_callable=AsyncMock):
-                with patch("app.modules.data_pipeline.failure_handler.run_with_retry", new_callable=AsyncMock) as mock_retry:
+                with patch("app.modules.data_pipeline.sync_runner.run_with_retry", new_callable=AsyncMock) as mock_retry:
                     mock_retry.return_value = (True, 1, "")
                     with patch("app.modules.data_pipeline.repository.mark_pipeline_run_succeeded", new_callable=AsyncMock) as mock_success:
                         

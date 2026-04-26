@@ -21,6 +21,7 @@ from typing import Optional
 from google.cloud import firestore  # type: ignore
 
 from app.modules.data_pipeline import repository
+from app.modules.data_pipeline.schemas import PIPELINE_RUN_TYPE_INCREMENTAL_SYNC
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,11 @@ async def get_checkpoint_window(
     """
     checkpoint_end = _utcnow()
 
-    last_run = await repository.get_last_successful_run(db, store_id=store_id)
+    last_run = await repository.get_last_successful_run(
+        db,
+        store_id=store_id,
+        run_type=PIPELINE_RUN_TYPE_INCREMENTAL_SYNC,
+    )
 
     if last_run and last_run.get("checkpoint_end"):
         raw_start = last_run["checkpoint_end"]
