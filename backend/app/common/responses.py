@@ -1,5 +1,5 @@
 """
-Response helpers for RetailMind AI.
+Response helpers for Stocklytics AI.
 
 Provides a consistent way to build success JSON responses so all routers
 produce the same envelope shape without duplicating code.

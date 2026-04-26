@@ -4,11 +4,11 @@ Data Pipeline Module – BigQuery Raw Loader.
 Reads changed Firestore documents within a checkpoint window and
 upserts them into the five BigQuery raw tables:
 
-    retailmind_raw.transactions_raw
-    retailmind_raw.transaction_items_raw
-    retailmind_raw.inventory_snapshot_raw
-    retailmind_raw.customers_raw
-    retailmind_raw.alerts_raw
+    stocklytics_raw.transactions_raw
+    stocklytics_raw.transaction_items_raw
+    stocklytics_raw.inventory_snapshot_raw
+    stocklytics_raw.customers_raw
+    stocklytics_raw.alerts_raw
 
 Table schemas match database_design.md §4 exactly.
 

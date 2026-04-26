@@ -18,7 +18,7 @@ All code for the `data_pipeline` module has been implemented according to the de
 
 ## Pending Integrations
 - Testing: Added `backend/tests/test_data_pipeline.py` and `backend/tests/test_data_pipeline_e2e.py` for retries, checkpoint behavior, trigger flow, and API error paths.
-- BigQuery Setup: Project infrastructure needs actual BigQuery datasets `retailmind_raw` and `retailmind_mart` initialized in GCP to test the DML queries directly.
+- BigQuery Setup: Project infrastructure needs actual BigQuery datasets `stocklytics_raw` and `stocklytics_mart` initialized in GCP to test the DML queries directly.
 
 ## Deployment Notes
 Cloud Run Jobs must be deployed via Terraform/gcloud targeting the scripts:

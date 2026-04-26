@@ -30,7 +30,7 @@ def client() -> TestClient:
             user_id="dev_user_001",
             role="admin",
             store_id="store_001",
-            email="dev@retailmind.local",
+            email="dev@stocklytics.local",
         )
 
     app.dependency_overrides[require_auth] = _admin_user
@@ -99,6 +99,18 @@ class TestDataPipelineRouter:
             assert data["error"]["code"] == "PIPELINE_ALREADY_RUNNING"
             assert data["error"]["details"]["active_pipeline_run_id"] == "run_active_123"
 
+    def test_sync_trigger_rejects_store_scope_mismatch(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/v1/pipeline/runs/sync",
+            json={"store_id": "store_999", "trigger_mode": "manual"},
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["error"]["code"] == "INVALID_REQUEST"
+        assert data["error"]["details"]["request_store_id"] == "store_999"
+        assert data["error"]["details"]["auth_store_id"] == "store_001"
+
     def test_get_run_status_success(self, client: TestClient) -> None:
         with patch(
             "app.modules.data_pipeline.service._get_firestore",
@@ -153,7 +165,7 @@ class TestDataPipelineRouter:
                 user_id="staff_001",
                 role="staff",
                 store_id="store_001",
-                email="staff@retailmind.local",
+                email="staff@stocklytics.local",
             )
 
         app.dependency_overrides[require_auth] = _staff_user
