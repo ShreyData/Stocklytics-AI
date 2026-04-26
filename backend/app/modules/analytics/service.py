@@ -158,12 +158,7 @@ class AnalyticsService:
     async def get_customer_insights(self, store_id: str) -> Dict[str, Any]:
         metadata = await self._get_metadata_or_raise(store_id)
         top_customers = await self.repo.get_customer_insights(store_id)
-        if not top_customers:
-            raise AnalyticsNotReadyError(
-                "Customer insights data is not available.",
-                details={"store_id": store_id}
-            )
-        
+
         response = self._format_freshness(metadata)
         response["top_customers"] = top_customers
         return response

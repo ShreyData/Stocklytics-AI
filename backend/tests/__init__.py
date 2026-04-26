@@ -1,1 +1,1 @@
-"""Test package for RetailMind AI backend."""
+"""Test package for Stocklytics AI backend."""
