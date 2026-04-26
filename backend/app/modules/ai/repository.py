@@ -78,7 +78,8 @@ async def get_analytics_metadata(store_id: str) -> Optional[dict[str, Any]]:
     Returns None if no metadata document exists yet.
     """
     db = _get_db()
-    doc: DocumentSnapshot = await db.collection(ANALYTICS_METADATA_COLLECTION).document(store_id).get()
+    metadata_id = f"{store_id}_dashboard"
+    doc: DocumentSnapshot = await db.collection(ANALYTICS_METADATA_COLLECTION).document(metadata_id).get()
     if not doc.exists:
         return None
     data: dict[str, Any] = doc.to_dict() or {}
