@@ -244,4 +244,5 @@ class TestAnalyticsAiIntegration:
 
         assert analytics_result["freshness_status"] == "stale"
         assert ai_result["freshness_status"] == "stale"
-        assert "stale" in ai_result["answer"]
+        assert "freshness status" not in ai_result["answer"].lower()
+        assert "latest available snapshot" not in ai_result["answer"].lower()

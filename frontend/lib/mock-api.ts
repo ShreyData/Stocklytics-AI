@@ -339,8 +339,78 @@ function applyAlertFilters(items: Alert[], filters: AlertFilters = {}) {
   });
 }
 
-function aiFreshnessNote() {
-  return '\n\nNote: Analytics data is slightly delayed, so this answer uses the latest available snapshot.';
+function queryIncludes(query: string, terms: string[]) {
+  const lowered = query.toLowerCase();
+  return terms.some((term) => lowered.includes(term));
+}
+
+function buildMockAssistantAnswer(storeId: string, query: string) {
+  const dashboard = getDashboardSummarySnapshot();
+  const activeAlerts = state.alerts.filter((alert) => alert.status === 'ACTIVE');
+  const activeProducts = state.products.filter((product) => product.status === 'ACTIVE');
+  const lowStockProducts = activeProducts.filter(
+    (product) => product.quantity_on_hand <= product.reorder_threshold
+  );
+  const riskProducts = activeProducts.filter((product) =>
+    product.expiry_status === 'EXPIRED' ||
+    product.expiry_status === 'EXPIRING_SOON' ||
+    product.quantity_on_hand <= product.reorder_threshold
+  );
+
+  if (queryIncludes(query, ['new product', 'recent product', 'added in inventory', 'added to inventory'])) {
+    const newest = [...activeProducts].sort((left, right) =>
+      new Date(right.created_at ?? 0).getTime() - new Date(left.created_at ?? 0).getTime()
+    )[0];
+    if (!newest) {
+      return `I could not find a recent product addition for ${storeId}.`;
+    }
+    return `${newest.name} is the newest product in inventory. It is in ${newest.category}, priced at ${newest.price}, and currently has ${newest.quantity_on_hand} units on hand.`;
+  }
+
+  if (queryIncludes(query, ['what needs attention', 'focus', 'priority', 'inventory status', 'current inventory status'])) {
+    const topRisk = riskProducts[0];
+    const topAlert = activeAlerts[0];
+    const parts = [
+      `For ${storeId}, ${lowStockProducts.length} products are at or below reorder threshold and ${riskProducts.filter((product) => product.expiry_status !== 'OK').length} have expiry risk.`,
+    ];
+    if (topAlert) {
+      parts.push(`Your top alert is ${topAlert.title}.`);
+    }
+    if (topRisk) {
+      parts.push(`${topRisk.name} is the most urgent inventory item with ${topRisk.quantity_on_hand} units left and status ${topRisk.expiry_status.toLowerCase()}.`);
+    }
+    parts.push('Best next move is to restock the weakest items first and clear expired inventory from sale.');
+    return parts.join(' ');
+  }
+
+  if (queryIncludes(query, ['best customers', 'top customers', 'loyal customers', 'my customers', 'customer'])) {
+    const topCustomers = [...state.customers]
+      .sort((left, right) => {
+        if (right.total_spend !== left.total_spend) {
+          return right.total_spend - left.total_spend;
+        }
+        return right.visit_count - left.visit_count;
+      })
+      .slice(0, 3);
+
+    if (topCustomers.length === 0) {
+      return `I could not find customer records for ${storeId} right now.`;
+    }
+
+    return `Your top customers right now are ${topCustomers
+      .map((customer) => `${customer.name} (${customer.total_spend} spend, ${customer.visit_count} visits)`)
+      .join(', ')}. Best next move is to keep these repeat buyers engaged with stock updates or bundle offers.`;
+  }
+
+  if (queryIncludes(query, ['sales', 'sale', 'revenue', 'transactions'])) {
+    return `Today's sales are ${dashboard.today_sales} across ${dashboard.today_transactions} transactions. ${dashboard.top_selling_product ?? 'Your top product'} is leading today, so protect its stock cover.`;
+  }
+
+  const topAlert = activeAlerts.find((alert) => alert.status !== 'RESOLVED');
+  const topProduct = dashboard.top_selling_product ?? 'your fastest moving product';
+  return topAlert
+    ? `For ${storeId}, focus first on ${topAlert.title.toLowerCase()} and keep an eye on ${topProduct}.`
+    : `For ${storeId}, inventory looks stable right now. Keep an eye on ${topProduct}.`;
 }
 
 export const mockApi = {
@@ -699,11 +769,7 @@ export const mockApi = {
   },
 
   async askAI(storeId: string, chatSessionId: string, query: string): Promise<AIChatResponse> {
-    const topAlert = state.alerts.find((alert) => alert.status !== 'RESOLVED');
-    const topProduct = getDashboardSummarySnapshot().top_selling_product ?? 'your fastest moving product';
-    const answer = topAlert
-      ? `For ${storeId}, focus first on ${topAlert.title.toLowerCase()} and keep an eye on ${topProduct}.${aiFreshnessNote()}`
-      : `For ${storeId}, inventory looks stable right now. Keep an eye on ${topProduct}.${aiFreshnessNote()}`;
+    const answer = buildMockAssistantAnswer(storeId, query);
     const now = new Date().toISOString();
     const history = state.chatHistory[chatSessionId] ?? [];
     history.push(

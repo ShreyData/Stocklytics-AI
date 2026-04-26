@@ -16,6 +16,29 @@ from app.common.google_clients import (
 logger = logging.getLogger(__name__)
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Coerce Firestore values into ints without raising on blanks or bad data."""
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce Firestore values into floats without raising on blanks or bad data."""
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class AnalyticsRepository:
     def __init__(self):
         settings = get_settings()
@@ -161,12 +184,12 @@ class AnalyticsRepository:
 
         for doc in transaction_docs:
             txn = doc.to_dict() or {}
-            today_sales += float(txn.get("total_amount", 0.0))
+            today_sales += _safe_float(txn.get("total_amount", 0.0))
             for item in txn.get("items", []):
                 product_id = item.get("product_id")
                 if not product_id:
                     continue
-                product_units_sold[product_id] += int(item.get("quantity", 0))
+                product_units_sold[product_id] += _safe_int(item.get("quantity", 0))
                 if item.get("product_name"):
                     product_name_by_id[product_id] = str(item["product_name"])
 
@@ -177,8 +200,8 @@ class AnalyticsRepository:
                 continue
             product_id = str(product.get("product_id") or doc.id)
             product_name_by_id.setdefault(product_id, str(product.get("name") or product_id))
-            quantity_on_hand = int(product.get("quantity_on_hand", 0))
-            reorder_threshold = int(product.get("reorder_threshold", 0))
+            quantity_on_hand = _safe_int(product.get("quantity_on_hand", 0))
+            reorder_threshold = _safe_int(product.get("reorder_threshold", 0))
             if quantity_on_hand <= reorder_threshold:
                 low_stock_count += 1
 
@@ -240,7 +263,7 @@ class AnalyticsRepository:
                 label,
                 {"label": label, "sales_amount": 0.0, "transactions": 0},
             )
-            bucket["sales_amount"] += float(txn.get("total_amount", 0.0))
+            bucket["sales_amount"] += _safe_float(txn.get("total_amount", 0.0))
             bucket["transactions"] += 1
 
         return [
@@ -276,8 +299,8 @@ class AnalyticsRepository:
                         "revenue": 0.0,
                     },
                 )
-                bucket["quantity_sold"] += int(item.get("quantity", 0))
-                bucket["revenue"] += float(item.get("line_total", 0.0))
+                bucket["quantity_sold"] += _safe_int(item.get("quantity", 0))
+                bucket["revenue"] += _safe_float(item.get("line_total", 0.0))
 
         ranked = sorted(
             product_totals.values(),
@@ -307,8 +330,8 @@ class AnalyticsRepository:
                 {
                     "customer_id": str(customer.get("customer_id") or doc.id),
                     "name": str(customer.get("name") or "Unknown"),
-                    "lifetime_spend": round(float(customer.get("total_spend", 0.0)), 2),
-                    "visit_count": int(customer.get("visit_count", 0)),
+                    "lifetime_spend": round(_safe_float(customer.get("total_spend", 0.0)), 2),
+                    "visit_count": _safe_int(customer.get("visit_count", 0)),
                 }
             )
 
