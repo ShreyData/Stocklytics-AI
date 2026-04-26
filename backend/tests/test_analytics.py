@@ -125,6 +125,18 @@ class TestAnalyticsAPI:
         assert "freshness_status" in body
         assert body["top_customers"] == mock_customers
 
+    def test_customer_insights_returns_empty_list_when_mart_has_no_rows(self):
+        with (
+            patch("app.modules.analytics.repository.AnalyticsRepository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),
+            patch("app.modules.analytics.repository.AnalyticsRepository.get_customer_insights", new_callable=AsyncMock, return_value=[]),
+        ):
+            response = client.get("/api/v1/analytics/customer-insights", headers=AUTH_HEADER)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["top_customers"] == []
+        assert body["freshness_status"] == "fresh"
+
     def test_dashboard_freshness_becomes_delayed_by_timestamp_age(self):
         delayed_metadata = {
             "analytics_last_updated_at": "2026-04-02T11:15:00+00:00",

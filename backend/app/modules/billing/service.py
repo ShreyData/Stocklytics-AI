@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from app.common.config import get_settings
 from app.common.exceptions import (
     ConflictError,
     NotFoundError,
@@ -168,6 +169,57 @@ def _build_transaction_detail(transaction_doc: dict[str, Any]) -> dict[str, Any]
             for item in transaction_doc.get("items", [])
         ],
     }
+
+
+def _schedule_low_stock_evaluation(
+    *,
+    store_id: str,
+    product_id: str,
+    product_name: str,
+    current_stock: int,
+    reorder_threshold: int,
+) -> None:
+    """
+    Schedule post-billing low-stock evaluation without blocking the API response.
+
+    In local mode without Firestore configured, skip the cross-module hook so tests
+    and bootstrap validation do not accidentally trigger real dependency work.
+    """
+    settings = get_settings()
+    if settings.is_local and not settings.firestore_project_id:
+        logger.info(
+            "Skipping low-stock evaluation in local mode because Firestore is not configured",
+            extra={"store_id": store_id, "product_id": product_id},
+        )
+        return
+
+    import asyncio  # noqa: PLC0415
+
+    async def _run() -> None:
+        try:
+            await evaluate_low_stock(
+                store_id=store_id,
+                product_id=product_id,
+                product_name=product_name,
+                current_stock=current_stock,
+                reorder_threshold=reorder_threshold,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Low-stock evaluation failed after billing",
+                extra={"store_id": store_id, "product_id": product_id},
+            )
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning(
+            "No running event loop available for low-stock evaluation",
+            extra={"store_id": store_id, "product_id": product_id},
+        )
+        return
+
+    loop.create_task(_run())
 
 
 async def create_transaction(
@@ -369,7 +421,6 @@ async def create_transaction(
 
     # Evaluate LOW_STOCK alerts post-transaction
     if not stored_response.get("idempotent_replay"):
-        import asyncio
         inventory_updates = stored_response.get("inventory_updates", [])
         for update in inventory_updates:
             prod_id = update.get("product_id")
@@ -377,17 +428,13 @@ async def create_transaction(
             product_doc = products.get(prod_id, {})
             reorder_thresh = int(product_doc.get("reorder_threshold", 0))
             product_name = product_doc.get("name", "Unknown Product")
-            
-            # Fire asynchronously so we don't block the return, or just await it if needed.
-            # Using asyncio.create_task ensures it doesn't block the API response time significantly.
-            asyncio.create_task(
-                evaluate_low_stock(
-                    store_id=store_id,
-                    product_id=prod_id,
-                    product_name=product_name,
-                    current_stock=new_qty,
-                    reorder_threshold=reorder_thresh
-                )
+
+            _schedule_low_stock_evaluation(
+                store_id=store_id,
+                product_id=prod_id,
+                product_name=product_name,
+                current_stock=new_qty,
+                reorder_threshold=reorder_thresh,
             )
 
     logger.info(

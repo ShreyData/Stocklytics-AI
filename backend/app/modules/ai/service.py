@@ -80,7 +80,7 @@ def _get_gemini_model() -> genai.GenerativeModel:
 # Context builder
 # ---------------------------------------------------------------------------
 
-_SYSTEM_INSTRUCTION = """You are RetailMind AI, a business intelligence assistant for a retail store.
+_SYSTEM_INSTRUCTION = """You are Stocklytics AI, a business intelligence assistant for a retail store.
 Your role is to answer the store owner's questions using ONLY the structured data provided in the context below.
 
 Rules you MUST follow:

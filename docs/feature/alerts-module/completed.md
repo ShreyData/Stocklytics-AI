@@ -1,6 +1,6 @@
 # Alerts Module — Completed Implementation
 
-This document summarises all work completed on the `feature/alerts-module` branch to deliver the Alerts Module of the RetailMind AI modular monolith.
+This document summarises all work completed on the `feature/alerts-module` branch to deliver the Alerts Module of the Stocklytics AI modular monolith.
 
 ---
 

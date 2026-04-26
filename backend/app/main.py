@@ -1,5 +1,5 @@
 """
-RetailMind AI – FastAPI application entry point.
+Stocklytics AI – FastAPI application entry point.
 
 Architecture: modular monolith (see Plan/architecture_overview.md)
 Base API path: /api/v1
@@ -50,9 +50,9 @@ settings = get_settings()
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     application = FastAPI(
-        title="RetailMind AI",
+        title="Stocklytics AI",
         description=(
-            "Modular monolith API for RetailMind AI – "
+            "Modular monolith API for Stocklytics AI – "
             "inventory, billing, customers, analytics, alerts, AI, and data pipeline."
         ),
         version="0.1.0",
@@ -118,7 +118,7 @@ def create_app() -> FastAPI:
     )
 
     logger.info(
-        "RetailMind AI started",
+        "Stocklytics AI started",
         extra={"env": settings.app_env, "port": settings.api_port},
     )
 
