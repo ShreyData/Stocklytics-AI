@@ -5,6 +5,11 @@ from typing import Any, Dict, List, Optional
 from google.cloud import bigquery, firestore
 
 from app.common.config import get_settings
+from app.common.google_clients import (
+    create_bigquery_client,
+    create_firestore_async_client,
+    get_default_gcp_project,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -13,23 +18,23 @@ class AnalyticsRepository:
     def __init__(self):
         settings = get_settings()
         self.firestore_project_id = settings.firestore_project_id
-        self.bigquery_project_id = settings.bigquery_project_id
+        self.bigquery_project_id = get_default_gcp_project(settings)
         self.dataset_mart = settings.bigquery_dataset_mart
         self.dataset_raw = settings.bigquery_dataset_raw
-        self.project = settings.bigquery_project_id
+        self.project = self.bigquery_project_id
         self._db: Optional[firestore.AsyncClient] = None
         self._bq: Optional[bigquery.Client] = None
 
     @property
     def db(self) -> firestore.AsyncClient:
         if self._db is None:
-            self._db = firestore.AsyncClient(project=self.firestore_project_id or None)
+            self._db = create_firestore_async_client(project=self.firestore_project_id or None)
         return self._db
 
     @property
     def bq(self) -> bigquery.Client:
         if self._bq is None:
-            self._bq = bigquery.Client(project=self.bigquery_project_id or None)
+            self._bq = create_bigquery_client(project=self.bigquery_project_id or None)
         return self._bq
 
     async def get_analytics_metadata(self, store_id: str) -> Optional[Dict[str, Any]]:

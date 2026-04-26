@@ -85,9 +85,9 @@ async def _probe_firestore() -> str:
         return "not_configured" if settings.is_local else "error"
 
     def _ping_firestore() -> str:
-        from google.cloud import firestore
+        from app.common.google_clients import create_firestore_client
 
-        client = firestore.Client(project=settings.firestore_project_id or None)
+        client = create_firestore_client(project=settings.firestore_project_id or None)
         # Minimal API call to verify credentials and service reachability.
         list(client.collections(page_size=1))
         return "ok"
@@ -113,9 +113,9 @@ async def _probe_bigquery() -> str:
         return "not_configured" if settings.is_local else "error"
 
     def _ping_bigquery() -> str:
-        from google.cloud import bigquery
+        from app.common.google_clients import create_bigquery_client, get_default_gcp_project
 
-        client = bigquery.Client(project=settings.bigquery_project_id or None)
+        client = create_bigquery_client(project=get_default_gcp_project(settings))
         query_job = client.query("SELECT 1 AS ready_check")
         query_job.result(timeout=2)
         return "ok"

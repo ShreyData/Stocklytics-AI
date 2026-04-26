@@ -308,6 +308,7 @@ export default function Inventory() {
   const { storeId } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showLowStockOnly, setShowLowStockOnly] = useState(false);
 
   // Dialog state
   const [addOpen, setAddOpen] = useState(false);
@@ -333,6 +334,14 @@ export default function Inventory() {
     fetchProducts();
   }, [fetchProducts]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    setShowLowStockOnly(params.get('low_stock_only') === 'true');
+  }, []);
+
   const handleEdit = (product: Product) => {
     setSelectedProduct(product);
     setEditOpen(true);
@@ -343,11 +352,20 @@ export default function Inventory() {
     setAdjustOpen(true);
   };
 
+  const visibleProducts = showLowStockOnly
+    ? products.filter((product) => product.quantity_on_hand <= product.reorder_threshold)
+    : products;
+
   return (
     <AppLayout>
       <div className="space-y-8">
         <div className="flex items-center justify-between">
-          <h1 className="text-3xl font-bold tracking-tight">Inventory</h1>
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">Inventory</h1>
+            {showLowStockOnly ? (
+              <p className="mt-1 text-sm text-muted-foreground">Showing only low stock products from the dashboard quick link.</p>
+            ) : null}
+          </div>
           <Button onClick={() => setAddOpen(true)}>
             <Plus className="w-4 h-4 mr-2" />
             Add Product
@@ -374,14 +392,16 @@ export default function Inventory() {
                     Loading inventory...
                   </TableCell>
                 </TableRow>
-              ) : products.length === 0 ? (
+              ) : visibleProducts.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                    No products found. Click &quot;Add Product&quot; to get started.
+                    {showLowStockOnly
+                      ? 'No low stock products right now.'
+                      : 'No products found. Click "Add Product" to get started.'}
                   </TableCell>
                 </TableRow>
               ) : (
-                products.map((product) => {
+                visibleProducts.map((product) => {
                   const isLowStock = product.quantity_on_hand <= product.reorder_threshold;
                   return (
                     <TableRow

@@ -34,3 +34,5 @@ build/
 coverage/
 
 .codex
+auth-id-keys.txt
+backend/set_firebase_claims.local.py

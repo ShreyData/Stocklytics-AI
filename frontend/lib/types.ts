@@ -19,6 +19,8 @@ export interface UserProfile {
   email?: string | null;
 }
 
+export type AuthMode = 'firebase' | 'mock';
+
 export interface MeResponse {
   request_id: string;
   user: UserProfile;
@@ -140,6 +142,12 @@ export interface CustomerCreateRequest {
   phone: string;
 }
 
+export interface CustomerPurchaseHistoryItem {
+  transaction_id: string;
+  total_amount: number;
+  sale_timestamp: string;
+}
+
 // ---------------------------------------------------------------------------
 // Alert types
 // ---------------------------------------------------------------------------
@@ -154,7 +162,11 @@ export interface Alert {
   message: string;
   created_at: string;
   acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
   resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_note?: string | null;
+  condition_key?: string;
   source_entity_id?: string;
 }
 
@@ -162,6 +174,12 @@ export interface AlertsSummary {
   active: number;
   acknowledged: number;
   resolved_today: number;
+}
+
+export interface AlertFilters {
+  status?: Alert['status'] | 'ALL';
+  alert_type?: Alert['alert_type'] | 'ALL';
+  severity?: Alert['severity'] | 'ALL';
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +241,12 @@ export interface AIChatResponse {
   freshness_status: FreshnessStatus;
   answer: string;
   grounding: AIGrounding;
+}
+
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant';
+  text: string;
+  created_at: string;
 }
 
 // ---------------------------------------------------------------------------

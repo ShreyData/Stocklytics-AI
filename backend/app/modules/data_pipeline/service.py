@@ -22,14 +22,17 @@ from google.cloud import firestore as fs_client_module  # type: ignore
 
 from app.common.config import get_settings
 from app.common.exceptions import ConflictError, NotFoundError
+from app.common.google_clients import (
+    create_bigquery_client,
+    create_firestore_async_client,
+    get_default_gcp_project,
+)
 from app.modules.data_pipeline import repository, sync_runner
 from app.modules.data_pipeline.schemas import (
     PIPELINE_RUN_STATUS_QUEUED,
 )
 
 logger = logging.getLogger(__name__)
-
-_settings = get_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -42,18 +45,20 @@ _bigquery_client: bq_client_module.Client | None = None
 
 def _get_firestore() -> fs_client_module.AsyncClient:
     global _firestore_client
+    settings = get_settings()
     if _firestore_client is None:
-        _firestore_client = fs_client_module.AsyncClient(
-            project=_settings.firestore_project_id or None
+        _firestore_client = create_firestore_async_client(
+            project=settings.firestore_project_id or None
         )
     return _firestore_client
 
 
 def _get_bigquery() -> bq_client_module.Client:
     global _bigquery_client
+    settings = get_settings()
     if _bigquery_client is None:
-        _bigquery_client = bq_client_module.Client(
-            project=_settings.bigquery_project_id or None
+        _bigquery_client = create_bigquery_client(
+            project=get_default_gcp_project(settings)
         )
     return _bigquery_client
 

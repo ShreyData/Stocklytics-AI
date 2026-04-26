@@ -3,13 +3,15 @@
 import { useEffect, useState } from 'react';
 import { AppLayout } from '@/components/app-layout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { apiService } from '@/lib/api-service';
 import { useAuth } from '@/components/auth-provider';
 import { AlertsSummary, DashboardSummary } from '@/lib/types';
 import { FreshnessBadge } from '@/components/freshness-badge';
-import { DollarSign, ShoppingCart, Bell, PackageX, CheckCircle2 } from 'lucide-react';
+import { DollarSign, ShoppingCart, Bell, PackageX, CheckCircle2, ArrowRight } from 'lucide-react';
 import { toast } from 'sonner';
 import { getErrorMessage } from '@/lib/errors';
+import Link from 'next/link';
 
 export default function Dashboard() {
   const { storeId } = useAuth();
@@ -127,6 +129,57 @@ export default function Dashboard() {
             <CardContent className="flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4 text-green-500" />
               <div className="text-xl font-bold">{alertSummary?.resolved_today || 0}</div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-3">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Low Stock Queue</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                Review products that need replenishment before the next billing rush.
+              </p>
+              <Link href="/inventory?low_stock_only=true">
+                <Button variant="outline" className="w-full justify-between">
+                  Open Low Stock Products
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+              </Link>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Alert Workflow</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                Triage active alerts and keep resolved alerts visible in history.
+              </p>
+              <Link href="/alerts">
+                <Button variant="outline" className="w-full justify-between">
+                  Open Active Alerts
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+              </Link>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Grounded AI</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                Ask the AI assistant about sales, low stock, and fresh vs stale analytics.
+              </p>
+              <Link href="/ai-chat">
+                <Button variant="outline" className="w-full justify-between">
+                  Open AI Chat
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+              </Link>
             </CardContent>
           </Card>
         </div>

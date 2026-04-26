@@ -30,15 +30,27 @@ export default function Billing() {
     if (!storeId) return;
 
     const fetchData = async () => {
-      try {
-        const [productsRes, customersRes] = await Promise.all([
-          apiService.getProducts(storeId),
-          apiService.getCustomers(),
-        ]);
-        setProducts(productsRes.items);
-        setCustomers(customersRes.items);
-      } catch (error) {
-        toast.error(getErrorMessage(error, 'Failed to load billing data.'));
+      const [productsRes, customersRes] = await Promise.allSettled([
+        apiService.getProducts(storeId),
+        apiService.getCustomers(),
+      ]);
+
+      if (productsRes.status === 'fulfilled') {
+        setProducts(productsRes.value.items);
+      } else {
+        setProducts([]);
+        toast.error(
+          getErrorMessage(productsRes.reason, 'Failed to load products for billing.')
+        );
+      }
+
+      if (customersRes.status === 'fulfilled') {
+        setCustomers(customersRes.value.items);
+      } else {
+        setCustomers([]);
+        toast.error(
+          getErrorMessage(customersRes.reason, 'Failed to load customers for billing.')
+        );
       }
     };
     fetchData();
@@ -162,21 +174,29 @@ export default function Billing() {
 
             <h2 className="text-xl font-semibold">Products</h2>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              {products.map((product) => (
-                <Card
-                  key={product.product_id}
-                  className="cursor-pointer hover:border-primary transition-colors"
-                  onClick={() => addToCart(product)}
-                >
-                  <CardContent className="p-4 flex flex-col items-center justify-center text-center h-full">
-                    <div className="font-medium">{product.name}</div>
-                    <div className="text-muted-foreground">${product.price.toFixed(2)}</div>
-                    <div className="text-xs mt-2 text-muted-foreground">
-                      Stock: {product.quantity_on_hand}
-                    </div>
+              {products.length === 0 ? (
+                <Card className="col-span-full">
+                  <CardContent className="p-6 text-sm text-muted-foreground">
+                    No products are available for this store yet, or the product list request failed.
                   </CardContent>
                 </Card>
-              ))}
+              ) : (
+                products.map((product) => (
+                  <Card
+                    key={product.product_id}
+                    className="cursor-pointer hover:border-primary transition-colors"
+                    onClick={() => addToCart(product)}
+                  >
+                    <CardContent className="p-4 flex flex-col items-center justify-center text-center h-full">
+                      <div className="font-medium">{product.name}</div>
+                      <div className="text-muted-foreground">${product.price.toFixed(2)}</div>
+                      <div className="text-xs mt-2 text-muted-foreground">
+                        Stock: {product.quantity_on_hand}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))
+              )}
             </div>
           </div>
 

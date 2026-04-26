@@ -15,10 +15,12 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from google.cloud import bigquery
-from google.cloud import firestore
+from dotenv import load_dotenv
+
+load_dotenv(".env")
 
 from app.common.config import setup_logging, get_settings
+from app.common.google_clients import create_bigquery_client, create_firestore_async_client, get_default_gcp_project
 from app.modules.data_pipeline import transform_runner, repository
 from app.modules.data_pipeline.schemas import (
     PIPELINE_RUN_TYPE_INCREMENTAL_SYNC,
@@ -28,7 +30,7 @@ from app.modules.data_pipeline.schemas import (
 logger = logging.getLogger(__name__)
 
 
-async def _get_active_store_ids(db: firestore.AsyncClient) -> list[str]:
+async def _get_active_store_ids(db) -> list[str]:
     stores = []
     async for doc in db.collection("stores").stream():
         stores.append(doc.id)
@@ -47,8 +49,8 @@ async def main() -> None:
     setup_logging()
     _settings = get_settings()
     
-    db = firestore.AsyncClient(project=_settings.firestore_project_id or None)
-    bq = bigquery.Client(project=_settings.bigquery_project_id or None)
+    db = create_firestore_async_client(project=_settings.firestore_project_id or None)
+    bq = create_bigquery_client(project=get_default_gcp_project(_settings))
 
     logger.info("Starting pipeline-transform-job")
 
