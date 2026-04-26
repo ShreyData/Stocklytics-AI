@@ -12,12 +12,20 @@ Coverage:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.modules.ai.service import (
+    AIService,
+    _build_fallback_answer,
+    _build_operator_answer,
+    _generate_model_answer,
+    _infer_analytics_used,
+)
 
 client = TestClient(app, raise_server_exceptions=False)
 AUTH_HEADER = {"Authorization": "Bearer dev-token"}
@@ -85,9 +93,14 @@ MOCK_INVENTORY = [
     {
         "product_id": "prod_biscuit_01",
         "name": "Biscuit Pack",
+        "category": "Snacks",
         "quantity_on_hand": 50,
         "price": 20.0,
         "reorder_threshold": 10,
+        "expiry_status": "OK",
+        "status": "ACTIVE",
+        "created_at": "2026-04-01T09:05:00Z",
+        "updated_at": "2026-04-02T10:00:00Z",
     }
 ]
 
@@ -147,7 +160,7 @@ class TestPostChat:
         assert "alert_013" in grounding["alerts_used"]
         assert "prod_biscuit_01" in grounding["inventory_products_used"]
 
-    def test_stale_data_appends_freshness_warning(self):
+    def test_stale_data_uses_separate_freshness_fields_without_appending_warning(self):
         stale_metadata = {**MOCK_METADATA, "freshness_status": "stale"}
         with (
             patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=stale_metadata),
@@ -161,8 +174,10 @@ class TestPostChat:
         ):
             body = client.post("/api/v1/ai/chat", json=VALID_PAYLOAD, headers=AUTH_HEADER).json()
 
-        assert "stale" in body["answer"]
-        assert "⚠️" in body["answer"]
+        assert body["freshness_status"] == "stale"
+        assert "freshness status" not in body["answer"].lower()
+        assert "latest available snapshot" not in body["answer"].lower()
+        assert "analytics data is not current" not in body["answer"].lower()
 
     def test_returns_503_when_metadata_missing(self):
         with patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=None):
@@ -240,6 +255,50 @@ class TestPostChat:
         roles = [call.kwargs["role"] for call in append_mock.await_args_list]
         assert roles == ["user", "assistant"]
 
+    def test_returns_answer_even_when_persistence_fails(self):
+        with (
+            patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),
+            patch("app.modules.ai.repository.get_relevant_alerts_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_inventory_snapshot", new_callable=AsyncMock, return_value=[]),
+            patch("app.modules.ai.repository.get_analytics_context", new_callable=AsyncMock, return_value=MOCK_ANALYTICS_CONTEXT),
+            patch("app.modules.ai.service._generate_model_answer", new_callable=AsyncMock, return_value=MOCK_GEMINI_ANSWER),
+            patch("app.modules.ai.repository.get_chat_session", new_callable=AsyncMock, side_effect=RuntimeError("firestore read failed")),
+        ):
+            body = asyncio.run(
+                AIService().chat(
+                    store_id="store_001",
+                    user_id="dev_user_001",
+                    chat_session_id="chat_001",
+                    query="Why are biscuit sales low this week?",
+                )
+            )
+
+        assert body["chat_session_id"] == "chat_001"
+        assert isinstance(body["answer"], str)
+        assert len(body["answer"]) > 0
+
+    def test_returns_answer_when_firestore_context_reads_fail(self):
+        with (
+            patch("app.modules.ai.repository.get_analytics_metadata", new_callable=AsyncMock, side_effect=RuntimeError("metadata unavailable")),
+            patch("app.modules.ai.repository.get_relevant_alerts_snapshot", new_callable=AsyncMock, side_effect=RuntimeError("alerts unavailable")),
+            patch("app.modules.ai.repository.get_inventory_snapshot", new_callable=AsyncMock, side_effect=RuntimeError("inventory unavailable")),
+            patch("app.modules.ai.repository.get_analytics_context", new_callable=AsyncMock, return_value=MOCK_ANALYTICS_CONTEXT),
+            patch("app.modules.ai.service._generate_model_answer", new_callable=AsyncMock, return_value=MOCK_GEMINI_ANSWER),
+            patch("app.modules.ai.repository.get_chat_session", new_callable=AsyncMock, side_effect=RuntimeError("firestore read failed")),
+        ):
+            body = asyncio.run(
+                AIService().chat(
+                    store_id="store_001",
+                    user_id="dev_user_001",
+                    chat_session_id="chat_001",
+                    query="low stock product",
+                )
+            )
+
+        assert body["chat_session_id"] == "chat_001"
+        assert isinstance(body["answer"], str)
+        assert len(body["answer"]) > 0
+
 
 class TestGetChatSession:
     def test_returns_200_with_messages(self):
@@ -279,3 +338,183 @@ class TestGetChatSession:
     def test_requires_auth(self):
         response = client.get("/api/v1/ai/chat/sessions/chat_001")
         assert response.status_code == 401
+
+
+class TestAIFallbackAnswer:
+    def test_handles_blank_inventory_quantities_without_crashing(self):
+        answer = _build_fallback_answer(
+            query="Which stock items need attention?",
+            analytics_summary="today_sales=100; today_transactions=2",
+            analytics_context={"dashboard_summary": {}},
+            alerts=[],
+            inventory=[
+                {"product_id": "p1", "name": "Amul Gold 500ml", "quantity_on_hand": ""},
+                {"product_id": "p2", "name": "Bread", "quantity_on_hand": None},
+            ],
+            customers=[],
+            transactions=[],
+            freshness_status="fresh",
+        )
+
+        assert "inventory snapshot" in answer
+        assert "Amul Gold 500ml" in answer
+
+    def test_describes_newest_product_from_inventory_context(self):
+        answer = _build_operator_answer(
+            query="Tell about new product added in inventory",
+            analytics_context={"dashboard_summary": {}},
+            alerts=[],
+            inventory=[
+                {
+                    "product_id": "prod_old",
+                    "name": "Rice 5kg",
+                    "category": "Grocery",
+                    "price": 320,
+                    "quantity_on_hand": 18,
+                    "reorder_threshold": 10,
+                    "expiry_status": "OK",
+                    "status": "ACTIVE",
+                    "created_at": "2026-04-01T09:00:00Z",
+                    "updated_at": "2026-04-01T09:00:00Z",
+                },
+                {
+                    "product_id": "prod_new",
+                    "name": "Amul Gold 500ml",
+                    "category": "Dairy",
+                    "price": 35,
+                    "quantity_on_hand": 5,
+                    "reorder_threshold": 8,
+                    "expiry_status": "EXPIRING_SOON",
+                    "status": "ACTIVE",
+                    "created_at": "2026-04-26T09:30:00Z",
+                    "updated_at": "2026-04-26T09:30:00Z",
+                },
+            ],
+            customers=[],
+            transactions=[],
+        )
+
+        assert answer is not None
+        assert "Amul Gold 500ml" in answer
+        assert "newest product" in answer
+        assert "needs replenishment planning" in answer
+
+    def test_inventory_status_answer_highlights_risks_and_next_step(self):
+        answer = _build_operator_answer(
+            query="Tell current inventory status",
+            analytics_context={"dashboard_summary": {}},
+            alerts=[
+                {
+                    "alert_id": "alert_1",
+                    "title": "Low Stock: Butter Biscuit",
+                    "status": "ACTIVE",
+                }
+            ],
+            inventory=[
+                {
+                    "product_id": "prod_1",
+                    "name": "Butter Biscuit",
+                    "quantity_on_hand": 6,
+                    "reorder_threshold": 8,
+                    "expiry_status": "EXPIRING_SOON",
+                    "status": "ACTIVE",
+                },
+                {
+                    "product_id": "prod_2",
+                    "name": "Milk 1L",
+                    "quantity_on_hand": 0,
+                    "reorder_threshold": 6,
+                    "expiry_status": "EXPIRED",
+                    "status": "ACTIVE",
+                },
+            ],
+            customers=[],
+            transactions=[],
+        )
+
+        assert answer is not None
+        assert "2 active products" in answer
+        assert "Top attention items" in answer
+        assert "Best next move" in answer
+
+    def test_customer_question_is_answered_from_customer_data(self):
+        answer = _build_operator_answer(
+            query="Tell about my best customers",
+            analytics_context={"dashboard_summary": {}, "customer_insights": []},
+            alerts=[],
+            inventory=[],
+            customers=[
+                {
+                    "customer_id": "cust_001",
+                    "name": "Ravi Kumar",
+                    "total_spend": 3140,
+                    "visit_count": 9,
+                    "last_purchase_at": "2026-04-25T13:45:00Z",
+                },
+                {
+                    "customer_id": "cust_002",
+                    "name": "Asha Patel",
+                    "total_spend": 1860,
+                    "visit_count": 5,
+                    "last_purchase_at": "2026-04-24T11:20:00Z",
+                },
+            ],
+            transactions=[],
+        )
+
+        assert answer is not None
+        assert "Your top customers right now are" in answer
+        assert "Ravi Kumar" in answer
+        assert "Best next move" in answer
+
+    def test_inventory_question_does_not_mark_analytics_as_used(self):
+        analytics_used = _infer_analytics_used(
+            query="Tell about new product in inventory",
+            answer="The newest product I can see is Maida in Groceries, added today.",
+            operator_analytics_used=False,
+        )
+
+        assert analytics_used is False
+
+
+class TestAIModelTransport:
+    def test_generate_model_answer_uses_rest_response_text(self):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {"text": "Model answer from REST"}
+                                ]
+                            }
+                        }
+                    ]
+                }
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        with (
+            patch("app.modules.ai.service.httpx.AsyncClient", FakeClient),
+            patch("app.modules.ai.service.get_settings") as settings_mock,
+        ):
+            settings_mock.return_value.gemini_api_key = "test-key"
+            settings_mock.return_value.gemma_model_id = "gemma-3-27b-it"
+            answer = asyncio.run(_generate_model_answer("hello"))
+
+        assert answer == "Model answer from REST"

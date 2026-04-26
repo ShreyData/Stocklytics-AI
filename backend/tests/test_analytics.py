@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.modules.analytics.repository import _safe_float, _safe_int
 from app.modules.analytics.service import AnalyticsService
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -191,3 +192,31 @@ class TestAnalyticsAPI:
         assert response.status_code == 200
         body = response.json()
         assert body["freshness_status"] == "stale"
+
+
+class TestAnalyticsRepositoryCoercion:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, 0),
+            ("", 0),
+            ("7", 7),
+            ("7.9", 7),
+            ("bad", 0),
+        ],
+    )
+    def test_safe_int_handles_loose_firestore_values(self, value, expected):
+        assert _safe_int(value) == expected
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, 0.0),
+            ("", 0.0),
+            ("12.5", 12.5),
+            (9, 9.0),
+            ("bad", 0.0),
+        ],
+    )
+    def test_safe_float_handles_loose_firestore_values(self, value, expected):
+        assert _safe_float(value) == expected

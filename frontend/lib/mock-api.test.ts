@@ -71,10 +71,17 @@ describe('mockApi', () => {
     expect(alerts.items.some((alert) => alert.source_entity_id === 'prod_rice_5kg')).toBe(true);
   });
 
-  it('returns AI answers with a freshness note when analytics is delayed', async () => {
+  it('returns AI answers without duplicating the freshness note in the text', async () => {
     const response = await mockApi.askAI('store_001', 'chat_demo_qa', 'What needs attention?');
 
     expect(response.freshness_status).toBe('fresh');
-    expect(response.answer).toContain('latest available snapshot');
+    expect(response.answer).not.toContain('latest available snapshot');
+  });
+
+  it('answers customer ranking questions from customer data', async () => {
+    const response = await mockApi.askAI('store_001', 'chat_demo_qa', 'Tell about my best customers');
+
+    expect(response.answer).toContain('Your top customers right now are');
+    expect(response.answer).toContain('Ravi Kumar');
   });
 });

@@ -37,6 +37,7 @@ class Settings:
 
     # Gemini
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemma_model_id: str = os.getenv("GEMMA_MODEL_ID", "gemma-3-27b-it")
 
     @property
     def is_local(self) -> bool:
