@@ -1,4 +1,5 @@
-from typing import Any, Dict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
 from app.common.exceptions import ServiceUnavailableError, ValidationError
 from app.modules.analytics.repository import AnalyticsRepository
@@ -16,8 +17,60 @@ class InvalidAnalyticsQueryError(ValidationError):
 
 
 class AnalyticsService:
+    _FRESH_MAX_AGE = timedelta(minutes=30)
+    _DELAYED_MAX_AGE = timedelta(hours=2)
+    _FRESHNESS_ORDER = {
+        "fresh": 0,
+        "delayed": 1,
+        "stale": 2,
+    }
+
     def __init__(self):
         self.repo = AnalyticsRepository()
+
+    @staticmethod
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _to_datetime(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+        if hasattr(value, "seconds"):
+            return datetime.fromtimestamp(value.seconds, tz=timezone.utc)
+        if isinstance(value, str):
+            candidate = value.strip()
+            if not candidate:
+                return None
+            if candidate.endswith("Z"):
+                candidate = candidate[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(candidate)
+            except ValueError:
+                return None
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+        return None
+
+    def _freshness_from_timestamp(self, updated_at: Optional[datetime]) -> str:
+        if updated_at is None:
+            return "stale"
+
+        age = self._utcnow() - updated_at
+        if age <= timedelta(0):
+            return "fresh"
+        if age <= self._FRESH_MAX_AGE:
+            return "fresh"
+        if age <= self._DELAYED_MAX_AGE:
+            return "delayed"
+        return "stale"
+
+    def _merge_freshness(self, computed_status: str, metadata_status: Any) -> str:
+        candidate = str(metadata_status).strip().lower() if metadata_status is not None else ""
+        if candidate not in self._FRESHNESS_ORDER:
+            return computed_status
+        return candidate if self._FRESHNESS_ORDER[candidate] > self._FRESHNESS_ORDER[computed_status] else computed_status
 
     async def _get_metadata_or_raise(self, store_id: str) -> Dict[str, Any]:
         """Fetch metadata, raising AnalyticsNotReadyError if not found."""
@@ -31,16 +84,21 @@ class AnalyticsService:
 
     def _format_freshness(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Extract freshness fields for shared response."""
-        # Convert timestamp to ISO format if it's a Firestore DatetimeWithNanoseconds
-        updated_at = metadata.get("analytics_last_updated_at")
-        if hasattr(updated_at, "isoformat"):
-            updated_at = updated_at.isoformat()
-        elif updated_at is not None:
-            updated_at = str(updated_at)
-            
+        updated_raw = metadata.get("analytics_last_updated_at")
+        updated_dt = self._to_datetime(updated_raw)
+        computed_status = self._freshness_from_timestamp(updated_dt)
+        final_status = self._merge_freshness(computed_status, metadata.get("freshness_status"))
+
+        if hasattr(updated_raw, "isoformat"):
+            updated_at = updated_raw.isoformat()
+        elif updated_raw is None:
+            updated_at = None
+        else:
+            updated_at = str(updated_raw)
+
         return {
             "analytics_last_updated_at": updated_at,
-            "freshness_status": metadata.get("freshness_status", "stale"),
+            "freshness_status": final_status,
         }
 
     async def get_dashboard_summary(self, store_id: str) -> Dict[str, Any]:
@@ -100,12 +158,7 @@ class AnalyticsService:
     async def get_customer_insights(self, store_id: str) -> Dict[str, Any]:
         metadata = await self._get_metadata_or_raise(store_id)
         top_customers = await self.repo.get_customer_insights(store_id)
-        if not top_customers:
-            raise AnalyticsNotReadyError(
-                "Customer insights data is not available.",
-                details={"store_id": store_id}
-            )
-        
+
         response = self._format_freshness(metadata)
         response["top_customers"] = top_customers
         return response

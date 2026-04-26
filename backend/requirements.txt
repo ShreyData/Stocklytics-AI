@@ -1,4 +1,4 @@
-# RetailMind AI – Backend Dependencies
+# Stocklytics AI – Backend Dependencies
 # Pin versions to ensure reproducible builds across the team.
 
 # Web framework

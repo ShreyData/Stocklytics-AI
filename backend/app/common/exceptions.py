@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.common.logging_config import request_id_ctx_var
 
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 class AppError(Exception):
     """
-    Base class for all RetailMind application errors.
+    Base class for all Stocklytics application errors.
     Subclass this to create domain-specific errors.
     """
 
@@ -159,6 +160,33 @@ async def request_validation_error_handler(
     )
 
 
+async def http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    """Normalize framework HTTP errors into the shared API error shape."""
+    request_id = request_id_ctx_var.get("-")
+
+    error_code = "HTTP_ERROR"
+    if exc.status_code == status.HTTP_404_NOT_FOUND:
+        error_code = "NOT_FOUND"
+    elif exc.status_code == status.HTTP_401_UNAUTHORIZED:
+        error_code = "UNAUTHORIZED"
+    elif exc.status_code == status.HTTP_403_FORBIDDEN:
+        error_code = "FORBIDDEN"
+
+    details: dict[str, Any] = {}
+    if exc.detail is not None:
+        details["detail"] = exc.detail
+
+    return _build_error_response(
+        request_id=request_id,
+        http_status=exc.status_code,
+        error_code=error_code,
+        message=str(exc.detail or "Request failed."),
+        details=details,
+    )
+
+
 async def unhandled_exception_handler(
     request: Request, exc: Exception
 ) -> JSONResponse:
@@ -180,4 +208,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     """
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(RequestValidationError, request_validation_error_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)

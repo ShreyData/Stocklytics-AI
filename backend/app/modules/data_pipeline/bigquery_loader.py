@@ -4,11 +4,11 @@ Data Pipeline Module – BigQuery Raw Loader.
 Reads changed Firestore documents within a checkpoint window and
 upserts them into the five BigQuery raw tables:
 
-    retailmind_raw.transactions_raw
-    retailmind_raw.transaction_items_raw
-    retailmind_raw.inventory_snapshot_raw
-    retailmind_raw.customers_raw
-    retailmind_raw.alerts_raw
+    stocklytics_raw.transactions_raw
+    stocklytics_raw.transaction_items_raw
+    stocklytics_raw.inventory_snapshot_raw
+    stocklytics_raw.customers_raw
+    stocklytics_raw.alerts_raw
 
 Table schemas match database_design.md §4 exactly.
 
@@ -18,10 +18,10 @@ Idempotency:
     (data_pipeline_design.md §10, data_pipeline_implementation.md §9).
 
 Source collections read (Firestore, database_design.md §3):
-    - transactions   (updated_at >= checkpoint_start)
+    - transactions   (created_at >= checkpoint_start)
     - products       (updated_at >= checkpoint_start) → inventory_snapshot_raw
     - customers      (updated_at >= checkpoint_start)
-    - alerts         (updated_at >= checkpoint_start or created_at >= checkpoint_start)
+    - alerts         (created_at / last_evaluated_at / acknowledged_at / resolved_at in window)
 """
 
 from __future__ import annotations
@@ -30,6 +30,9 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+import io
+import json
 
 from google.cloud import bigquery, firestore  # type: ignore
 
@@ -100,9 +103,6 @@ async def _query_firestore_window(
     return docs
 
 
-import io
-import json
-
 def _merge_query(
     bq: bigquery.Client,
     *,
@@ -110,7 +110,7 @@ def _merge_query(
     dataset: str,
     table: str,
     rows: list[dict],
-    merge_key: str,
+    merge_keys: str | list[str],
 ) -> None:
     """
     Perform an idempotent BigQuery MERGE.
@@ -118,7 +118,8 @@ def _merge_query(
     """
     if not rows:
         return
-        
+
+    key_columns = [merge_keys] if isinstance(merge_keys, str) else merge_keys
     full_table = f"{project}.{dataset}.{table}"
     temp_table_id = f"{project}.{dataset}.{table}_temp_{uuid.uuid4().hex[:8]}"
 
@@ -138,14 +139,15 @@ def _merge_query(
     try:
         # 2. Execute MERGE
         columns = list(rows[0].keys())
-        set_clause = ", ".join(f"T.{col} = S.{col}" for col in columns if col != merge_key)
+        set_clause = ", ".join(f"T.{col} = S.{col}" for col in columns if col not in key_columns)
         insert_cols = ", ".join(columns)
         insert_vals = ", ".join(f"S.{col}" for col in columns)
-        
+        on_clause = " AND ".join(f"T.{col} = S.{col}" for col in key_columns)
+
         sql = f"""
         MERGE `{full_table}` AS T
         USING `{temp_table_id}` AS S
-        ON T.{merge_key} = S.{merge_key}
+        ON {on_clause}
         WHEN MATCHED THEN
             UPDATE SET {set_clause}
         WHEN NOT MATCHED THEN
@@ -190,8 +192,6 @@ async def load_transactions_raw(
     txn_rows = []
     item_rows = []
 
-    captured_at = checkpoint_end.isoformat()
-
     for txn in txns:
         txn_rows.append({
             "transaction_id": _safe_str(txn.get("transaction_id") or txn.get("_doc_id")),
@@ -205,20 +205,52 @@ async def load_transactions_raw(
         })
 
         txn_id = _safe_str(txn.get("transaction_id") or txn.get("_doc_id"))
-        for item in txn.get("items", []):
-            item_rows.append({
-                "transaction_id": txn_id,
-                "store_id": _safe_str(txn.get("store_id")),
-                "product_id": _safe_str(item.get("product_id")),
-                "product_name": _safe_str(item.get("product_name")),
-                "quantity": _safe_int(item.get("quantity")),
-                "unit_price": _safe_float(item.get("unit_price")),
-                "line_total": _safe_float(item.get("line_total")),
-                "sale_timestamp": _ts(txn.get("sale_timestamp")),
-            })
+        txn_store_id = _safe_str(txn.get("store_id"))
 
-    _merge_query(bq, project=project, dataset=dataset, table="transactions_raw", rows=txn_rows, merge_key="transaction_id")
-    _merge_query(bq, project=project, dataset=dataset, table="transaction_items_raw", rows=item_rows, merge_key="transaction_id")
+        # Enforce one row per (transaction_id, product_id) so MERGE stays deterministic.
+        aggregated_items: dict[str, dict[str, Any]] = {}
+        for item in txn.get("items", []):
+            product_id = _safe_str(item.get("product_id"))
+            if not product_id:
+                continue
+
+            quantity = _safe_int(item.get("quantity")) or 0
+            line_total = _safe_float(item.get("line_total")) or 0.0
+            unit_price = _safe_float(item.get("unit_price"))
+            product_name = _safe_str(item.get("product_name"))
+
+            current = aggregated_items.get(product_id)
+            if current is None:
+                aggregated_items[product_id] = {
+                    "transaction_id": txn_id,
+                    "store_id": txn_store_id,
+                    "product_id": product_id,
+                    "product_name": product_name,
+                    "quantity": quantity,
+                    "unit_price": unit_price,
+                    "line_total": line_total,
+                    "sale_timestamp": _ts(txn.get("sale_timestamp")),
+                }
+                continue
+
+            current["quantity"] = int(current.get("quantity", 0)) + quantity
+            current["line_total"] = round(float(current.get("line_total", 0.0)) + line_total, 2)
+            if current.get("product_name") is None and product_name is not None:
+                current["product_name"] = product_name
+            if current.get("unit_price") is None and unit_price is not None:
+                current["unit_price"] = unit_price
+
+        item_rows.extend(aggregated_items.values())
+
+    _merge_query(bq, project=project, dataset=dataset, table="transactions_raw", rows=txn_rows, merge_keys="transaction_id")
+    _merge_query(
+        bq,
+        project=project,
+        dataset=dataset,
+        table="transaction_items_raw",
+        rows=item_rows,
+        merge_keys=["transaction_id", "product_id"],
+    )
 
     records_written = len(txn_rows) + len(item_rows)
     logger.info(
@@ -273,7 +305,7 @@ async def load_inventory_snapshot_raw(
             "captured_at": captured_at,
         })
 
-    _merge_query(bq, project=project, dataset=dataset, table="inventory_snapshot_raw", rows=rows, merge_key="snapshot_id")
+    _merge_query(bq, project=project, dataset=dataset, table="inventory_snapshot_raw", rows=rows, merge_keys="snapshot_id")
 
     logger.info(
         "Loaded inventory snapshot raw",
@@ -317,7 +349,7 @@ async def load_customers_raw(
             "captured_at": captured_at,
         })
 
-    _merge_query(bq, project=project, dataset=dataset, table="customers_raw", rows=rows, merge_key="customer_id")
+    _merge_query(bq, project=project, dataset=dataset, table="customers_raw", rows=rows, merge_keys="customer_id")
 
     logger.info(
         "Loaded customers raw",
@@ -335,14 +367,22 @@ async def load_alerts_raw(
     checkpoint_end: datetime,
 ) -> tuple[int, int]:
     """Load changed alert documents into alerts_raw."""
-    alerts = await _query_firestore_window(
-        db,
-        collection="alerts",
-        store_id=store_id,
-        since=checkpoint_start,
-        until=checkpoint_end,
-        timestamp_field="created_at",
-    )
+    alerts_by_doc_id: dict[str, dict[str, Any]] = {}
+    for timestamp_field in ("created_at", "last_evaluated_at", "acknowledged_at", "resolved_at"):
+        changed = await _query_firestore_window(
+            db,
+            collection="alerts",
+            store_id=store_id,
+            since=checkpoint_start,
+            until=checkpoint_end,
+            timestamp_field=timestamp_field,
+        )
+        for alert in changed:
+            doc_id = str(alert.get("_doc_id", ""))
+            if doc_id:
+                alerts_by_doc_id[doc_id] = alert
+
+    alerts = list(alerts_by_doc_id.values())
 
     project = _settings.bigquery_project_id
     dataset = _settings.bigquery_dataset_raw
@@ -362,7 +402,7 @@ async def load_alerts_raw(
             "captured_at": captured_at,
         })
 
-    _merge_query(bq, project=project, dataset=dataset, table="alerts_raw", rows=rows, merge_key="alert_id")
+    _merge_query(bq, project=project, dataset=dataset, table="alerts_raw", rows=rows, merge_keys="alert_id")
 
     logger.info(
         "Loaded alerts raw",

@@ -129,7 +129,7 @@ async def require_auth(
                 user_id="dev_user_001",
                 role="admin",
                 store_id="store_001",
-                email="dev@retailmind.local",
+                email="dev@stocklytics.local",
             )
         raise UnauthorizedError(
             "Stub auth mode is active. Use the token 'dev-token' for local development."

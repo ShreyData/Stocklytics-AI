@@ -25,8 +25,8 @@ class Settings:
 
     # BigQuery
     bigquery_project_id: str = os.getenv("BIGQUERY_PROJECT_ID", "")
-    bigquery_dataset_raw: str = os.getenv("BIGQUERY_DATASET_RAW", "retailmind_raw")
-    bigquery_dataset_mart: str = os.getenv("BIGQUERY_DATASET_MART", "retailmind_mart")
+    bigquery_dataset_raw: str = os.getenv("BIGQUERY_DATASET_RAW", "stocklytics_raw")
+    bigquery_dataset_mart: str = os.getenv("BIGQUERY_DATASET_MART", "stocklytics_mart")
 
     # Gemini
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
