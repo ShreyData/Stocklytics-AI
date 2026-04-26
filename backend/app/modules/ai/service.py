@@ -21,8 +21,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 import google.generativeai as genai
 
@@ -140,13 +140,16 @@ def _response_guard(
     """
     answer = raw_answer.strip()
 
-    if freshness_status in {"stale", "delayed"}:
-        notice = (
-            "\n\n⚠️  Note: The analytics data may be outdated "
-            f"(freshness status: {freshness_status}). "
-            "Results shown reflect the last available sync."
+    if freshness_status == "delayed":
+        answer += (
+            "\n\n⚠️  Note: Analytics data may be slightly behind real-time activity "
+            "(freshness status: delayed)."
         )
-        answer += notice
+    elif freshness_status == "stale":
+        answer += (
+            "\n\n⚠️  Note: Analytics data is not current (freshness status: stale). "
+            "This answer uses the latest available snapshot and may miss recent changes."
+        )
 
     return answer
 
@@ -234,6 +237,75 @@ def _build_analytics_summary(
     return "; ".join(parts)
 
 
+_FRESH_MAX_AGE = timedelta(minutes=30)
+_DELAYED_MAX_AGE = timedelta(hours=2)
+_FRESHNESS_ORDER = {
+    "fresh": 0,
+    "delayed": 1,
+    "stale": 2,
+}
+
+
+def _to_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    if hasattr(value, "seconds"):
+        return datetime.fromtimestamp(value.seconds, tz=timezone.utc)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        if candidate.endswith("Z"):
+            candidate = candidate[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    return None
+
+
+def _freshness_from_timestamp(updated_at: Optional[datetime]) -> str:
+    if updated_at is None:
+        return "stale"
+
+    age = datetime.now(timezone.utc) - updated_at
+    if age <= timedelta(0):
+        return "fresh"
+    if age <= _FRESH_MAX_AGE:
+        return "fresh"
+    if age <= _DELAYED_MAX_AGE:
+        return "delayed"
+    return "stale"
+
+
+def _merge_freshness(computed_status: str, metadata_status: Any) -> str:
+    candidate = str(metadata_status).strip().lower() if metadata_status is not None else ""
+    if candidate not in _FRESHNESS_ORDER:
+        return computed_status
+    if _FRESHNESS_ORDER[candidate] > _FRESHNESS_ORDER[computed_status]:
+        return candidate
+    return computed_status
+
+
+def _resolve_freshness_fields(metadata: dict[str, Any]) -> tuple[str, str]:
+    updated_raw = metadata.get("analytics_last_updated_at")
+    updated_dt = _to_datetime(updated_raw)
+    computed_status = _freshness_from_timestamp(updated_dt)
+    freshness_status = _merge_freshness(computed_status, metadata.get("freshness_status"))
+
+    if hasattr(updated_raw, "isoformat"):
+        last_updated = updated_raw.isoformat()
+    elif updated_raw is None:
+        last_updated = "unknown"
+    else:
+        last_updated = str(updated_raw)
+
+    return last_updated, freshness_status
+
+
 def _query_mentions_customers(query: str) -> bool:
     customer_keywords = {
         "customer",
@@ -295,8 +367,7 @@ class AIService:
                 details={"store_id": store_id},
             )
 
-        freshness_status: str = metadata.get("freshness_status", "unknown")
-        last_updated: str = str(metadata.get("analytics_last_updated_at", ""))
+        last_updated, freshness_status = _resolve_freshness_fields(metadata)
 
         # Step 2: Fetch context data
         alerts = await repository.get_relevant_alerts_snapshot(store_id)
@@ -319,7 +390,14 @@ class AIService:
                 "Please wait for the data pipeline to refresh the mart tables.",
                 details={"store_id": store_id},
             )
-        analytics_summary = _build_analytics_summary(metadata, analytics_context)
+        analytics_summary = _build_analytics_summary(
+            {
+                **metadata,
+                "analytics_last_updated_at": last_updated,
+                "freshness_status": freshness_status,
+            },
+            analytics_context,
+        )
         if not analytics_summary:
             raise AIContextNotReadyError(
                 "Analytics summary is not yet available. "
