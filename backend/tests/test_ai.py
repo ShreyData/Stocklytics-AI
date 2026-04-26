@@ -12,6 +12,7 @@ Coverage:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -27,8 +28,10 @@ VALID_PAYLOAD = {
     "query": "Why are biscuit sales low this week?",
 }
 
+_FRESH_METADATA_TS = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 MOCK_METADATA = {
-    "analytics_last_updated_at": "2026-04-02T10:45:00Z",
+    "analytics_last_updated_at": _FRESH_METADATA_TS,
     "freshness_status": "fresh",
 }
 
@@ -121,7 +124,7 @@ class TestPostChat:
         body = response.json()
         assert "request_id" in body
         assert body["chat_session_id"] == "chat_001"
-        assert body["analytics_last_updated_at"] == "2026-04-02T10:45:00Z"
+        assert body["analytics_last_updated_at"] == _FRESH_METADATA_TS
         assert body["freshness_status"] == "fresh"
         assert isinstance(body["answer"], str)
         assert len(body["answer"]) > 0
