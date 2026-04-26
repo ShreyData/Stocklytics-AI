@@ -1,16 +1,21 @@
 import asyncio
+import logging
 from typing import Any, Dict, List, Optional
 
 from google.cloud import bigquery, firestore
 
 from app.common.config import get_settings
 
+logger = logging.getLogger(__name__)
+
+
 class AnalyticsRepository:
     def __init__(self):
         settings = get_settings()
         self.firestore_project_id = settings.firestore_project_id
         self.bigquery_project_id = settings.bigquery_project_id
-        self.dataset = settings.bigquery_dataset_mart
+        self.dataset_mart = settings.bigquery_dataset_mart
+        self.dataset_raw = settings.bigquery_dataset_raw
         self.project = settings.bigquery_project_id
         self._db: Optional[firestore.AsyncClient] = None
         self._bq: Optional[bigquery.Client] = None
@@ -42,14 +47,60 @@ class AnalyticsRepository:
 
     async def get_dashboard_summary(self, store_id: str) -> Optional[Dict[str, Any]]:
         query = f"""
-            SELECT today_sales, today_transactions, active_alert_count, low_stock_count, top_selling_product
-            FROM `{self.project}.{self.dataset}.dashboard_summary`
-            WHERE store_id = @store_id
-            ORDER BY snapshot_date DESC
-            LIMIT 1
+            WITH latest_dashboard AS (
+                SELECT
+                    today_sales,
+                    today_transactions,
+                    active_alert_count,
+                    low_stock_count,
+                    top_selling_product
+                FROM `{self.project}.{self.dataset_mart}.dashboard_summary`
+                WHERE store_id = @store_id
+                ORDER BY snapshot_date DESC
+                LIMIT 1
+            ),
+            latest_alert_status AS (
+                SELECT
+                    alert_id,
+                    status
+                FROM `{self.project}.{self.dataset_raw}.alerts_raw`
+                WHERE store_id = @store_id
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY alert_id
+                    ORDER BY captured_at DESC
+                ) = 1
+            ),
+            alert_truth AS (
+                SELECT
+                    COUNTIF(status = 'ACTIVE') AS active_alert_count
+                FROM latest_alert_status
+            )
+            SELECT
+                d.today_sales,
+                d.today_transactions,
+                COALESCE(a.active_alert_count, d.active_alert_count, 0) AS active_alert_count,
+                d.low_stock_count,
+                d.top_selling_product
+            FROM latest_dashboard AS d
+            LEFT JOIN alert_truth AS a
+            ON TRUE
         """
         params = [bigquery.ScalarQueryParameter("store_id", "STRING", store_id)]
-        rows = await asyncio.to_thread(self._run_query, query, params)
+        try:
+            rows = await asyncio.to_thread(self._run_query, query, params)
+        except Exception as exc:
+            logger.warning(
+                "Falling back to dashboard_summary-only active_alert_count query.",
+                extra={"store_id": store_id, "error": str(exc)},
+            )
+            fallback_query = f"""
+                SELECT today_sales, today_transactions, active_alert_count, low_stock_count, top_selling_product
+                FROM `{self.project}.{self.dataset_mart}.dashboard_summary`
+                WHERE store_id = @store_id
+                ORDER BY snapshot_date DESC
+                LIMIT 1
+            """
+            rows = await asyncio.to_thread(self._run_query, fallback_query, params)
         if rows:
             row = rows[0]
             # Convert decimal/float accurately if needed, simple float wrapping
@@ -74,7 +125,7 @@ class AnalyticsRepository:
                     CAST(DATE_TRUNC(sales_date, WEEK(MONDAY)) AS STRING) AS label,
                     SUM(total_sales) AS sales_amount,
                     SUM(transaction_count) AS transactions
-                FROM `{self.project}.{self.dataset}.sales_daily`
+                FROM `{self.project}.{self.dataset_mart}.sales_daily`
                 WHERE store_id = @store_id
                   AND sales_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @range_days DAY)
                 GROUP BY label
@@ -86,7 +137,7 @@ class AnalyticsRepository:
                     CAST(sales_date AS STRING) AS label,
                     total_sales AS sales_amount,
                     transaction_count AS transactions
-                FROM `{self.project}.{self.dataset}.sales_daily`
+                FROM `{self.project}.{self.dataset_mart}.sales_daily`
                 WHERE store_id = @store_id
                   AND sales_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @range_days DAY)
                 ORDER BY sales_date DESC
@@ -110,7 +161,7 @@ class AnalyticsRepository:
     async def get_product_performance(self, store_id: str) -> List[Dict[str, Any]]:
         query = f"""
             SELECT product_id, ANY_VALUE(product_name) as product_name, SUM(quantity_sold) as quantity_sold, SUM(revenue) as revenue
-            FROM `{self.project}.{self.dataset}.product_sales_daily`
+            FROM `{self.project}.{self.dataset_mart}.product_sales_daily`
             WHERE store_id = @store_id
             GROUP BY product_id
             ORDER BY revenue DESC
@@ -131,7 +182,7 @@ class AnalyticsRepository:
     async def get_customer_insights(self, store_id: str) -> List[Dict[str, Any]]:
         query = f"""
             SELECT customer_id, customer_name as name, lifetime_spend, visit_count
-            FROM `{self.project}.{self.dataset}.customer_summary`
+            FROM `{self.project}.{self.dataset_mart}.customer_summary`
             WHERE store_id = @store_id
             ORDER BY lifetime_spend DESC
             LIMIT 10
