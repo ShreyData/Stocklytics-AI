@@ -122,6 +122,15 @@ def _merge_query(
     key_columns = [merge_keys] if isinstance(merge_keys, str) else merge_keys
     full_table = f"{project}.{dataset}.{table}"
     temp_table_id = f"{project}.{dataset}.{table}_temp_{uuid.uuid4().hex[:8]}"
+    target_table = bq.get_table(full_table)
+    target_schema = {field.name: field.field_type.upper() for field in target_table.schema}
+
+    def _expr_for(col: str) -> str:
+        field_type = target_schema.get(col, "").upper()
+        source = f"S.{col}"
+        if field_type in {"NUMERIC", "BIGNUMERIC", "INT64", "FLOAT64", "BOOL", "DATE", "DATETIME", "TIME", "TIMESTAMP"}:
+            return f"CAST({source} AS {field_type})"
+        return source
 
     # 1. Load rows into temp table
     buf = io.StringIO()
@@ -139,9 +148,11 @@ def _merge_query(
     try:
         # 2. Execute MERGE
         columns = list(rows[0].keys())
-        set_clause = ", ".join(f"T.{col} = S.{col}" for col in columns if col not in key_columns)
+        set_clause = ", ".join(
+            f"T.{col} = {_expr_for(col)}" for col in columns if col not in key_columns
+        )
         insert_cols = ", ".join(columns)
-        insert_vals = ", ".join(f"S.{col}" for col in columns)
+        insert_vals = ", ".join(_expr_for(col) for col in columns)
         on_clause = " AND ".join(f"T.{col} = S.{col}" for col in key_columns)
 
         sql = f"""
