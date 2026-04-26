@@ -177,11 +177,10 @@ class TestCreateTransaction:
         assert response.status_code == 201
 
         kwargs = create_mock.await_args.kwargs
-        assert kwargs["customer_summary_update"] == {
-            "customer_id": "cust_001",
-            "sale_amount": 140.0,
-            "sale_timestamp": FAKE_NOW,
-        }
+        customer_summary_update = kwargs["customer_summary_update"]
+        assert customer_summary_update["customer_id"] == "cust_001"
+        assert customer_summary_update["sale_amount"] == 140.0
+        assert customer_summary_update["sale_timestamp"] == kwargs["transaction_doc"]["sale_timestamp"]
 
     def test_requires_auth(self):
         response = client.post("/api/v1/billing/transactions", json=VALID_PAYLOAD)

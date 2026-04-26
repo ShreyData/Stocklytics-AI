@@ -1,6 +1,6 @@
 # Phase 1: API Foundation - Completed Work
 
-This document summarizes the work completed as part of the `feature/api-foundation` branch to establish the foundation of the RetailMind AI modular monolith.
+This document summarizes the work completed as part of the `feature/api-foundation` branch to establish the foundation of the Stocklytics AI modular monolith.
 
 ## Core Setup
 - **FastAPI Application Skeleton**: Set up the app factory structure in `backend/app/main.py` routing to `/api/v1`.

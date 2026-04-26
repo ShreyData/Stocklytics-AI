@@ -1,5 +1,5 @@
 """
-Logging configuration for RetailMind AI.
+Logging configuration for Stocklytics AI.
 Structured JSON logging ensuring request_id and other key IDs appear in every log record.
 """
 
