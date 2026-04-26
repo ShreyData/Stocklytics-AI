@@ -20,14 +20,13 @@ import {
   ProductUpdateRequest,
   SalesTrendPoint,
   StockAdjustmentRequest,
+  Transaction,
 } from './types';
 import {
   MOCK_AI_HISTORY,
   MOCK_ALERTS,
   MOCK_ANALYTICS_LAST_UPDATED_AT,
   MOCK_CUSTOMERS,
-  MOCK_CUSTOMER_INSIGHTS,
-  MOCK_DASHBOARD_SUMMARY,
   MOCK_PRODUCTS,
   MOCK_PURCHASE_HISTORY,
   MOCK_PRODUCT_PERFORMANCE,
@@ -40,6 +39,31 @@ type InventoryUpdatesResponse = {
   adjustment_id: string;
 };
 
+const LOW_STOCK_ALERT = 'LOW_STOCK';
+const EXPIRY_SOON_ALERT = 'EXPIRY_SOON';
+
+function computeExpiryStatus(expiryDate: string | null): Product['expiry_status'] {
+  if (!expiryDate) {
+    return 'OK';
+  }
+
+  const now = new Date();
+  const expiry = new Date(expiryDate);
+  if (Number.isNaN(expiry.getTime())) {
+    return 'OK';
+  }
+
+  const msRemaining = expiry.getTime() - now.getTime();
+  const daysRemaining = msRemaining / (1000 * 60 * 60 * 24);
+  if (daysRemaining < 0) {
+    return 'EXPIRED';
+  }
+  if (daysRemaining <= 7) {
+    return 'EXPIRING_SOON';
+  }
+  return 'OK';
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -50,8 +74,219 @@ const state = {
   purchaseHistory: clone(MOCK_PURCHASE_HISTORY),
   alerts: clone(MOCK_ALERTS),
   chatHistory: clone(MOCK_AI_HISTORY) as Record<string, ChatHistoryMessage[]>,
+  transactions: [] as Transaction[],
   transactionsByKey: new Map<string, BillingCreateResponse>(),
+  analyticsLastUpdatedAt: MOCK_ANALYTICS_LAST_UPDATED_AT,
 };
+
+function reevaluateDerivedState() {
+  const now = new Date().toISOString();
+
+  for (const product of state.products) {
+    product.expiry_status = computeExpiryStatus(product.expiry_date);
+  }
+
+  for (const product of state.products) {
+    const lowStockConditionKey = `${product.store_id}:LOW_STOCK:${product.product_id}`;
+    const lowStockAlert = state.alerts.find((alert) => alert.condition_key === lowStockConditionKey);
+    const isLowStock =
+      product.expiry_status !== 'EXPIRED' &&
+      product.quantity_on_hand <= product.reorder_threshold;
+
+    if (isLowStock) {
+      const severity = product.quantity_on_hand === 0 ? 'CRITICAL' : 'HIGH';
+      if (lowStockAlert) {
+        lowStockAlert.title = `Low Stock: ${product.name}`;
+        lowStockAlert.message = `Stock is below reorder threshold for ${product.name}. ${product.quantity_on_hand} units left against threshold ${product.reorder_threshold}.`;
+        lowStockAlert.severity = severity;
+        lowStockAlert.source_entity_id = product.product_id;
+        if (lowStockAlert.status === 'RESOLVED') {
+          lowStockAlert.status = 'ACTIVE';
+          lowStockAlert.acknowledged_at = null;
+          lowStockAlert.acknowledged_by = null;
+          lowStockAlert.resolved_at = null;
+          lowStockAlert.resolved_by = null;
+          lowStockAlert.resolution_note = null;
+          lowStockAlert.created_at = now;
+        }
+      } else {
+        state.alerts.unshift({
+          alert_id: `alert_low_stock_${product.product_id}`,
+          store_id: product.store_id,
+          alert_type: LOW_STOCK_ALERT,
+          status: 'ACTIVE',
+          severity,
+          title: `Low Stock: ${product.name}`,
+          message: `Stock is below reorder threshold for ${product.name}. ${product.quantity_on_hand} units left against threshold ${product.reorder_threshold}.`,
+          created_at: now,
+          condition_key: lowStockConditionKey,
+          source_entity_id: product.product_id,
+        });
+      }
+    } else if (lowStockAlert && lowStockAlert.status !== 'RESOLVED') {
+      lowStockAlert.status = 'RESOLVED';
+      lowStockAlert.resolved_at = now;
+      lowStockAlert.resolved_by = 'system';
+      lowStockAlert.resolution_note = `Stock recovered above reorder threshold for ${product.name}.`;
+    }
+
+    const expiryConditionKey = `${product.store_id}:EXPIRY_SOON:${product.product_id}`;
+    const expiryAlert = state.alerts.find((alert) => alert.condition_key === expiryConditionKey);
+    const hasExpiryRisk =
+      product.quantity_on_hand > 0 &&
+      (product.expiry_status === 'EXPIRING_SOON' || product.expiry_status === 'EXPIRED');
+
+    if (hasExpiryRisk) {
+      const isExpired = product.expiry_status === 'EXPIRED';
+      const severity = isExpired ? 'HIGH' : 'MEDIUM';
+      const message = isExpired
+        ? `${product.name} is expired and still has ${product.quantity_on_hand} units in stock.`
+        : `${product.name} will expire soon and still has ${product.quantity_on_hand} units in stock.`;
+
+      if (expiryAlert) {
+        expiryAlert.title = `${isExpired ? 'Expired' : 'Expiry Soon'}: ${product.name}`;
+        expiryAlert.message = message;
+        expiryAlert.severity = severity;
+        expiryAlert.source_entity_id = product.product_id;
+        if (expiryAlert.status === 'RESOLVED') {
+          expiryAlert.status = 'ACTIVE';
+          expiryAlert.acknowledged_at = null;
+          expiryAlert.acknowledged_by = null;
+          expiryAlert.resolved_at = null;
+          expiryAlert.resolved_by = null;
+          expiryAlert.resolution_note = null;
+          expiryAlert.created_at = now;
+        }
+      } else {
+        state.alerts.unshift({
+          alert_id: `alert_expiry_${product.product_id}`,
+          store_id: product.store_id,
+          alert_type: EXPIRY_SOON_ALERT,
+          status: 'ACTIVE',
+          severity,
+          title: `${isExpired ? 'Expired' : 'Expiry Soon'}: ${product.name}`,
+          message,
+          created_at: now,
+          condition_key: expiryConditionKey,
+          source_entity_id: product.product_id,
+        });
+      }
+    } else if (expiryAlert && expiryAlert.status !== 'RESOLVED') {
+      expiryAlert.status = 'RESOLVED';
+      expiryAlert.resolved_at = now;
+      expiryAlert.resolved_by = 'system';
+      expiryAlert.resolution_note = `Expiry risk cleared for ${product.name}.`;
+    }
+  }
+}
+
+function markAnalyticsUpdated() {
+  state.analyticsLastUpdatedAt = new Date().toISOString();
+}
+
+function getProductPerformanceSnapshot(): ProductPerformanceItem[] {
+  const performance = new Map(
+    MOCK_PRODUCT_PERFORMANCE.map((item) => [
+      item.product_id,
+      {
+        product_id: item.product_id,
+        product_name: item.product_name,
+        quantity_sold: item.quantity_sold,
+        revenue: item.revenue,
+      },
+    ])
+  );
+
+  for (const transaction of state.transactions) {
+    for (const item of transaction.items ?? []) {
+      const product = state.products.find((candidate) => candidate.product_id === item.product_id);
+      const existing = performance.get(item.product_id);
+      if (existing) {
+        existing.quantity_sold += item.quantity;
+        existing.revenue += item.line_total;
+      } else {
+        performance.set(item.product_id, {
+          product_id: item.product_id,
+          product_name: product?.name ?? item.product_id,
+          quantity_sold: item.quantity,
+          revenue: item.line_total,
+        });
+      }
+    }
+  }
+
+  return Array.from(performance.values()).sort((a, b) => {
+    if (b.revenue !== a.revenue) {
+      return b.revenue - a.revenue;
+    }
+    return b.quantity_sold - a.quantity_sold;
+  });
+}
+
+function getSalesTrendsSnapshot(): SalesTrendPoint[] {
+  const points = new Map(
+    MOCK_SALES_TRENDS.map((point) => [
+      point.label,
+      {
+        label: point.label,
+        sales_amount: point.sales_amount,
+        transactions: point.transactions,
+      },
+    ])
+  );
+
+  for (const transaction of state.transactions) {
+    if (!transaction.sale_timestamp) {
+      continue;
+    }
+    const label = transaction.sale_timestamp.slice(0, 10);
+    const point = points.get(label);
+    if (point) {
+      point.sales_amount += transaction.total_amount;
+      point.transactions += 1;
+    } else {
+      points.set(label, {
+        label,
+        sales_amount: transaction.total_amount,
+        transactions: 1,
+      });
+    }
+  }
+
+  return Array.from(points.values()).sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function getCustomerInsightsSnapshot(): CustomerInsight[] {
+  return clone(state.customers)
+    .sort((a, b) => {
+      if (b.total_spend !== a.total_spend) {
+        return b.total_spend - a.total_spend;
+      }
+      return b.visit_count - a.visit_count;
+    })
+    .map((customer) => ({
+      customer_id: customer.customer_id,
+      name: customer.name,
+      lifetime_spend: customer.total_spend,
+      visit_count: customer.visit_count,
+    }));
+}
+
+function getDashboardSummarySnapshot(): DashboardSummary {
+  const todayLabel = new Date().toISOString().slice(0, 10);
+  const salesToday = getSalesTrendsSnapshot().find((point) => point.label === todayLabel);
+  const productPerformance = getProductPerformanceSnapshot();
+
+  return {
+    today_sales: salesToday?.sales_amount ?? 0,
+    today_transactions: salesToday?.transactions ?? 0,
+    active_alert_count: state.alerts.filter((alert) => alert.status === 'ACTIVE').length,
+    low_stock_count: state.products.filter(
+      (product) => product.status === 'ACTIVE' && product.quantity_on_hand <= product.reorder_threshold
+    ).length,
+    top_selling_product: productPerformance[0]?.product_name ?? null,
+  };
+}
 
 export function resetMockState() {
   state.products = clone(MOCK_PRODUCTS);
@@ -59,7 +294,10 @@ export function resetMockState() {
   state.purchaseHistory = clone(MOCK_PURCHASE_HISTORY);
   state.alerts = clone(MOCK_ALERTS);
   state.chatHistory = clone(MOCK_AI_HISTORY) as Record<string, ChatHistoryMessage[]>;
+  state.transactions = [];
   state.transactionsByKey = new Map<string, BillingCreateResponse>();
+  state.analyticsLastUpdatedAt = MOCK_ANALYTICS_LAST_UPDATED_AT;
+  reevaluateDerivedState();
 }
 
 function nextRequestId(prefix: string) {
@@ -80,8 +318,8 @@ function getAlertsSummarySnapshot(alerts: Alert[]): AlertsSummary {
 function getAnalyticsEnvelope<T>(payload: Partial<AnalyticsResponse<T>>) {
   return {
     request_id: nextRequestId('req_mock'),
-    analytics_last_updated_at: MOCK_ANALYTICS_LAST_UPDATED_AT,
-    freshness_status: 'delayed' as const,
+    analytics_last_updated_at: state.analyticsLastUpdatedAt,
+    freshness_status: 'fresh' as const,
     ...payload,
   };
 }
@@ -152,6 +390,8 @@ export const mockApi = {
       updated_at: new Date().toISOString(),
     };
     state.products.unshift(product);
+    reevaluateDerivedState();
+    markAnalyticsUpdated();
     return {
       request_id: nextRequestId('req_product_create'),
       product: clone(product),
@@ -168,6 +408,9 @@ export const mockApi = {
       };
     }
     Object.assign(product, data, { updated_at: new Date().toISOString() });
+    product.expiry_status = computeExpiryStatus(product.expiry_date);
+    reevaluateDerivedState();
+    markAnalyticsUpdated();
     return {
       request_id: nextRequestId('req_product_update'),
       product: clone(product),
@@ -196,6 +439,8 @@ export const mockApi = {
 
     product.quantity_on_hand = nextQuantity;
     product.updated_at = new Date().toISOString();
+    reevaluateDerivedState();
+    markAnalyticsUpdated();
 
     return {
       request_id: nextRequestId('req_adjust'),
@@ -298,7 +543,10 @@ export const mockApi = {
       transaction,
       inventory_updates,
     };
+    state.transactions.unshift(clone(transaction));
     state.transactionsByKey.set(data.idempotency_key, clone(response));
+    reevaluateDerivedState();
+    markAnalyticsUpdated();
     return response;
   },
 
@@ -359,25 +607,25 @@ export const mockApi = {
 
   async getDashboardSummary(): Promise<AnalyticsResponse<DashboardSummary>> {
     return getAnalyticsEnvelope<DashboardSummary>({
-      summary: clone(MOCK_DASHBOARD_SUMMARY),
+      summary: getDashboardSummarySnapshot(),
     });
   },
 
   async getSalesTrends(): Promise<AnalyticsResponse<SalesTrendPoint>> {
     return getAnalyticsEnvelope<SalesTrendPoint>({
-      points: clone(MOCK_SALES_TRENDS),
+      points: getSalesTrendsSnapshot(),
     });
   },
 
   async getProductPerformance(): Promise<AnalyticsResponse<ProductPerformanceItem>> {
     return getAnalyticsEnvelope<ProductPerformanceItem>({
-      items: clone(MOCK_PRODUCT_PERFORMANCE),
+      items: getProductPerformanceSnapshot(),
     });
   },
 
   async getCustomerInsights(): Promise<AnalyticsResponse<CustomerInsight>> {
     return getAnalyticsEnvelope<CustomerInsight>({
-      top_customers: clone(MOCK_CUSTOMER_INSIGHTS),
+      top_customers: getCustomerInsightsSnapshot(),
     });
   },
 
@@ -451,7 +699,11 @@ export const mockApi = {
   },
 
   async askAI(storeId: string, chatSessionId: string, query: string): Promise<AIChatResponse> {
-    const answer = `For ${storeId}, focus first on low stock for Butter Biscuit and the recent demand spike for Rice 5kg.${aiFreshnessNote()}`;
+    const topAlert = state.alerts.find((alert) => alert.status !== 'RESOLVED');
+    const topProduct = getDashboardSummarySnapshot().top_selling_product ?? 'your fastest moving product';
+    const answer = topAlert
+      ? `For ${storeId}, focus first on ${topAlert.title.toLowerCase()} and keep an eye on ${topProduct}.${aiFreshnessNote()}`
+      : `For ${storeId}, inventory looks stable right now. Keep an eye on ${topProduct}.${aiFreshnessNote()}`;
     const now = new Date().toISOString();
     const history = state.chatHistory[chatSessionId] ?? [];
     history.push(
@@ -463,13 +715,19 @@ export const mockApi = {
     return {
       request_id: nextRequestId('req_ai'),
       chat_session_id: chatSessionId,
-      analytics_last_updated_at: MOCK_ANALYTICS_LAST_UPDATED_AT,
-      freshness_status: 'delayed',
+      analytics_last_updated_at: state.analyticsLastUpdatedAt,
+      freshness_status: 'fresh',
       answer,
       grounding: {
         analytics_used: true,
-        alerts_used: ['alert_low_stock_001', 'alert_high_demand_001'],
-        inventory_products_used: ['prod_biscuit_01', 'prod_rice_5kg'],
+        alerts_used: state.alerts
+          .filter((alert) => alert.status !== 'RESOLVED')
+          .slice(0, 3)
+          .map((alert) => alert.alert_id),
+        inventory_products_used: state.products
+          .filter((product) => product.quantity_on_hand <= product.reorder_threshold)
+          .slice(0, 3)
+          .map((product) => product.product_id),
       },
     };
   },
@@ -490,3 +748,5 @@ export const mockApi = {
     };
   },
 };
+
+resetMockState();

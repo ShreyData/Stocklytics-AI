@@ -101,18 +101,16 @@ async def get_active_alerts_snapshot(store_id: str, limit: int = 10) -> list[dic
     Reads directly from the alerts collection (owned by Alerts module).
     """
     db = _get_db()
-    query = (
-        db.collection(ALERTS_COLLECTION)
-        .where("store_id", "==", store_id)
-        .where("status", "==", "ACTIVE")
-        .limit(limit)
-    )
+    query = db.collection(ALERTS_COLLECTION).where("store_id", "==", store_id)
     results: list[dict[str, Any]] = []
     async for doc in query.stream():
         data: dict[str, Any] = doc.to_dict() or {}
         if "alert_id" not in data:
             data["alert_id"] = doc.id
-        results.append(data)
+        if data.get("status") == "ACTIVE":
+            results.append(data)
+        if len(results) >= limit:
+            break
     return results
 
 
@@ -129,18 +127,16 @@ async def get_relevant_alerts_snapshot(store_id: str, limit: int = 10) -> list[d
         return active_alerts
 
     db = _get_db()
-    acknowledged_query = (
-        db.collection(ALERTS_COLLECTION)
-        .where("store_id", "==", store_id)
-        .where("status", "==", "ACKNOWLEDGED")
-        .limit(limit - len(active_alerts))
-    )
+    acknowledged_query = db.collection(ALERTS_COLLECTION).where("store_id", "==", store_id)
     acknowledged_alerts: list[dict[str, Any]] = []
     async for doc in acknowledged_query.stream():
         data: dict[str, Any] = doc.to_dict() or {}
         if "alert_id" not in data:
             data["alert_id"] = doc.id
-        acknowledged_alerts.append(data)
+        if data.get("status") == "ACKNOWLEDGED":
+            acknowledged_alerts.append(data)
+        if len(acknowledged_alerts) >= limit - len(active_alerts):
+            break
 
     return active_alerts + acknowledged_alerts
 

@@ -171,7 +171,7 @@ def _build_transaction_detail(transaction_doc: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def _schedule_low_stock_evaluation(
+async def _run_low_stock_evaluation(
     *,
     store_id: str,
     product_id: str,
@@ -180,7 +180,7 @@ def _schedule_low_stock_evaluation(
     reorder_threshold: int,
 ) -> None:
     """
-    Schedule post-billing low-stock evaluation without blocking the API response.
+    Run post-billing low-stock evaluation after the transaction commit.
 
     In local mode without Firestore configured, skip the cross-module hook so tests
     and bootstrap validation do not accidentally trigger real dependency work.
@@ -192,34 +192,19 @@ def _schedule_low_stock_evaluation(
             extra={"store_id": store_id, "product_id": product_id},
         )
         return
-
-    import asyncio  # noqa: PLC0415
-
-    async def _run() -> None:
-        try:
-            await evaluate_low_stock(
-                store_id=store_id,
-                product_id=product_id,
-                product_name=product_name,
-                current_stock=current_stock,
-                reorder_threshold=reorder_threshold,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "Low-stock evaluation failed after billing",
-                extra={"store_id": store_id, "product_id": product_id},
-            )
-
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        logger.warning(
-            "No running event loop available for low-stock evaluation",
+        await evaluate_low_stock(
+            store_id=store_id,
+            product_id=product_id,
+            product_name=product_name,
+            current_stock=current_stock,
+            reorder_threshold=reorder_threshold,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Low-stock evaluation failed after billing",
             extra={"store_id": store_id, "product_id": product_id},
         )
-        return
-
-    loop.create_task(_run())
 
 
 async def create_transaction(
@@ -429,7 +414,7 @@ async def create_transaction(
             reorder_thresh = int(product_doc.get("reorder_threshold", 0))
             product_name = product_doc.get("name", "Unknown Product")
 
-            _schedule_low_stock_evaluation(
+            await _run_low_stock_evaluation(
                 store_id=store_id,
                 product_id=prod_id,
                 product_name=product_name,

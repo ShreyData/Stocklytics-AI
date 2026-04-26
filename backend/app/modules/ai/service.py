@@ -29,6 +29,7 @@ import google.generativeai as genai
 from app.common.config import get_settings
 from app.common.exceptions import NotFoundError, ServiceUnavailableError
 from app.modules.ai import repository
+from app.modules.analytics.repository import AnalyticsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,56 @@ def _extract_grounding(
         "alerts_used": [a.get("alert_id", "") for a in alerts],
         "inventory_products_used": [p.get("product_id", "") for p in inventory],
     }
+
+
+def _build_fallback_answer(
+    query: str,
+    analytics_summary: str,
+    alerts: list[dict[str, Any]],
+    inventory: list[dict[str, Any]],
+    freshness_status: str,
+) -> str:
+    """
+    Build a deterministic local fallback answer when Gemini or mart context is unavailable.
+    """
+    lines = []
+    lowered = query.lower()
+
+    if "sale" in lowered or "revenue" in lowered or "transaction" in lowered:
+        lines.append("Here is the latest operational sales snapshot I can confirm:")
+        for part in analytics_summary.split("; "):
+            if part.startswith(("today_sales=", "today_transactions=", "top_selling_product=")):
+                lines.append(part.replace("=", ": ", 1))
+
+    if "alert" in lowered or "stock" in lowered:
+        active_alerts = [alert for alert in alerts if alert.get("status") == "ACTIVE"]
+        low_stock_products = [
+            item for item in inventory
+            if int(item.get("quantity_on_hand", 0) or 0) <= 0
+            or str(item.get("expiry_status", "")).upper() in {"EXPIRING_SOON", "EXPIRED"}
+        ]
+        lines.append(f"Active alerts: {len(active_alerts)}.")
+        if active_alerts:
+            lines.append(
+                "Top alert titles: " + ", ".join(str(alert.get("title") or alert.get("alert_id")) for alert in active_alerts[:3])
+            )
+        if low_stock_products:
+            lines.append(
+                "Products needing attention: "
+                + ", ".join(str(item.get("name") or item.get("product_id")) for item in low_stock_products[:5])
+            )
+
+    if not lines:
+        lines.append("I can answer from the current operational store data, but the full AI provider context is unavailable right now.")
+        lines.append("Available snapshot:")
+        for part in analytics_summary.split("; "):
+            if part.startswith(("today_sales=", "today_transactions=", "active_alert_count=", "low_stock_count=")):
+                lines.append(part.replace("=", ": ", 1))
+
+    if freshness_status in {"delayed", "stale"}:
+        lines.append(f"Freshness status: {freshness_status}.")
+
+    return "\n".join(lines)
 
 
 def _build_analytics_summary(
@@ -361,11 +412,10 @@ class AIService:
         # Step 1: Freshness metadata
         metadata = await repository.get_analytics_metadata(store_id)
         if metadata is None:
-            raise AIContextNotReadyError(
-                "Analytics context is not yet available. "
-                "Please wait for the data pipeline to complete its first run.",
-                details={"store_id": store_id},
-            )
+            metadata = {
+                "analytics_last_updated_at": datetime.now(timezone.utc).isoformat(),
+                "freshness_status": "fresh",
+            }
 
         last_updated, freshness_status = _resolve_freshness_fields(metadata)
 
@@ -384,12 +434,14 @@ class AIService:
                 product_ids=[item.get("product_id") for item in inventory if item.get("product_id")],
             )
         except Exception as exc:
-            logger.warning("Analytics context query failed", exc_info=exc)
-            raise AIContextNotReadyError(
-                "Analytics summary is not yet available. "
-                "Please wait for the data pipeline to refresh the mart tables.",
-                details={"store_id": store_id},
-            )
+            logger.warning("Analytics context query failed; falling back to live operational summary", exc_info=exc)
+            live_repo = AnalyticsRepository()
+            analytics_context = {
+                "dashboard_summary": await live_repo.get_live_dashboard_summary(store_id),
+                "sales_trends": [],
+                "product_performance": [],
+                "customer_insights": [],
+            }
         analytics_summary = _build_analytics_summary(
             {
                 **metadata,
@@ -399,10 +451,18 @@ class AIService:
             analytics_context,
         )
         if not analytics_summary:
-            raise AIContextNotReadyError(
-                "Analytics summary is not yet available. "
-                "Please wait for the data pipeline to refresh the mart tables.",
-                details={"store_id": store_id},
+            live_repo = AnalyticsRepository()
+            live_summary = await live_repo.get_live_dashboard_summary(store_id)
+            analytics_summary = "; ".join(
+                [
+                    f"analytics_last_updated_at={last_updated}",
+                    f"freshness_status={freshness_status}",
+                    f"today_sales={live_summary.get('today_sales', 'unknown')}",
+                    f"today_transactions={live_summary.get('today_transactions', 'unknown')}",
+                    f"active_alert_count={live_summary.get('active_alert_count', 'unknown')}",
+                    f"low_stock_count={live_summary.get('low_stock_count', 'unknown')}",
+                    f"top_selling_product={live_summary.get('top_selling_product', 'unknown')}",
+                ]
             )
 
         # Step 3: Build prompt
@@ -419,10 +479,13 @@ class AIService:
             response = model.generate_content(full_prompt)
             raw_answer: str = response.text
         except Exception as exc:
-            logger.error("Gemini API call failed", exc_info=exc)
-            raise AIProviderError(
-                "The AI provider returned an error. Please try again later.",
-                details={"error": str(exc)},
+            logger.error("Gemini API call failed; using deterministic fallback answer", exc_info=exc)
+            raw_answer = _build_fallback_answer(
+                query=query,
+                analytics_summary=analytics_summary,
+                alerts=alerts,
+                inventory=inventory,
+                freshness_status=freshness_status,
             )
 
         # Step 5: Guard response

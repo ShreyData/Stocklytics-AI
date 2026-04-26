@@ -112,6 +112,23 @@ async def list_alerts(
     return success_response({"items": items})
 
 
+@router.get("", status_code=200, include_in_schema=False)
+async def list_alerts_without_trailing_slash(
+    store_id: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    alert_type: Optional[str] = Query(default=None),
+    severity: Optional[str] = Query(default=None),
+    user: AuthenticatedUser = Depends(require_auth),
+):
+    return await list_alerts(
+        store_id=store_id,
+        status=status,
+        alert_type=alert_type,
+        severity=severity,
+        user=user,
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/alerts/summary
 # ---------------------------------------------------------------------------

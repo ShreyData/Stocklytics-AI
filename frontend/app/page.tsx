@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AppLayout } from '@/components/app-layout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,7 @@ import { DollarSign, ShoppingCart, Bell, PackageX, CheckCircle2, ArrowRight } fr
 import { toast } from 'sonner';
 import { getErrorMessage } from '@/lib/errors';
 import Link from 'next/link';
+import { subscribeToDataChanged } from '@/lib/data-events';
 
 export default function Dashboard() {
   const { storeId } = useAuth();
@@ -21,30 +22,91 @@ export default function Dashboard() {
   const [freshness, setFreshness] = useState<'fresh' | 'delayed' | 'stale'>('fresh');
   const [loading, setLoading] = useState(true);
 
+  const fetchDashboard = useCallback(
+    async (showLoader = false) => {
+      if (!storeId) return;
+      if (showLoader) {
+        setLoading(true);
+      }
+      try {
+        let nextSummary: DashboardSummary | null = null;
+        let nextAlertSummary: AlertsSummary | null = null;
+        let nextLastUpdated = '';
+        let nextFreshness: 'fresh' | 'delayed' | 'stale' = 'fresh';
+
+        try {
+          const dashboardRes = await apiService.getLiveDashboardSummary(storeId);
+          nextSummary = dashboardRes.summary || null;
+          nextLastUpdated = dashboardRes.analytics_last_updated_at;
+          nextFreshness = dashboardRes.freshness_status;
+        } catch (error) {
+          const fallbackDashboardRes = await apiService.getDashboardSummary(storeId);
+          nextSummary = fallbackDashboardRes.summary || null;
+          nextLastUpdated = fallbackDashboardRes.analytics_last_updated_at;
+          nextFreshness = fallbackDashboardRes.freshness_status;
+
+          const message = getErrorMessage(error, '');
+          if (showLoader && message && message !== 'Not Found') {
+            toast.error(message);
+          }
+        }
+
+        try {
+          const alertsRes = await apiService.getAlertsSummary(storeId);
+          nextAlertSummary = alertsRes.summary || null;
+        } catch (error) {
+          const alertsRes = await apiService.getAlerts(storeId, { status: 'ALL' });
+          const today = new Date().toISOString().slice(0, 10);
+          const fallbackItems = alertsRes.items || [];
+
+          nextAlertSummary = {
+            active: fallbackItems.filter((alert) => alert.status === 'ACTIVE').length,
+            acknowledged: fallbackItems.filter((alert) => alert.status === 'ACKNOWLEDGED').length,
+            resolved_today: fallbackItems.filter(
+              (alert) => alert.status === 'RESOLVED' && alert.resolved_at?.slice(0, 10) === today
+            ).length,
+          };
+
+          const message = getErrorMessage(error, '');
+          if (showLoader && message && message !== 'Not Found') {
+            toast.error(message);
+          }
+        }
+
+        setSummary(nextSummary);
+        setAlertSummary(nextAlertSummary);
+        setLastUpdated(nextLastUpdated);
+        setFreshness(nextFreshness);
+      } catch (error) {
+        if (showLoader) {
+          const message = getErrorMessage(error, 'Failed to load dashboard.');
+          toast.error(message === 'Not Found' ? 'Failed to load dashboard.' : message);
+        }
+      } finally {
+        if (showLoader) {
+          setLoading(false);
+        }
+      }
+    },
+    [storeId]
+  );
+
   useEffect(() => {
     if (!storeId) return;
 
-    const fetchDashboard = async () => {
-      setLoading(true);
-      try {
-        const [dashboardRes, alertsRes] = await Promise.all([
-          apiService.getDashboardSummary(storeId),
-          apiService.getAlertsSummary(storeId),
-        ]);
+    void fetchDashboard(true);
+    const unsubscribe = subscribeToDataChanged(() => {
+      void fetchDashboard(false);
+    });
+    const intervalId = window.setInterval(() => {
+      void fetchDashboard(false);
+    }, 15000);
 
-        setSummary(dashboardRes.summary || null);
-        setAlertSummary(alertsRes.summary || null);
-        setLastUpdated(dashboardRes.analytics_last_updated_at);
-        setFreshness(dashboardRes.freshness_status);
-      } catch (error) {
-        toast.error(getErrorMessage(error, 'Failed to load dashboard.'));
-      } finally {
-        setLoading(false);
-      }
+    return () => {
+      unsubscribe();
+      window.clearInterval(intervalId);
     };
-
-    fetchDashboard();
-  }, [storeId]);
+  }, [fetchDashboard, storeId]);
 
   if (loading) {
     return (
@@ -55,6 +117,33 @@ export default function Dashboard() {
       </AppLayout>
     );
   }
+
+  const statsCards = [
+    {
+      title: "Today's Sales",
+      value: `$${(summary?.today_sales || 0).toLocaleString()}`,
+      icon: DollarSign,
+      valueClassName: 'text-2xl font-bold',
+    },
+    {
+      title: 'Transactions',
+      value: summary?.today_transactions || 0,
+      icon: ShoppingCart,
+      valueClassName: 'text-2xl font-bold',
+    },
+    {
+      title: 'Active Alerts',
+      value: summary?.active_alert_count || 0,
+      icon: Bell,
+      valueClassName: 'text-2xl font-bold text-destructive',
+    },
+    {
+      title: 'Low Stock Items',
+      value: summary?.low_stock_count || 0,
+      icon: PackageX,
+      valueClassName: 'text-2xl font-bold text-yellow-500',
+    },
+  ];
 
   return (
     <AppLayout>
@@ -67,42 +156,17 @@ export default function Dashboard() {
         </div>
 
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Today&apos;s Sales</CardTitle>
-              <DollarSign className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">${(summary?.today_sales || 0).toLocaleString()}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Transactions</CardTitle>
-              <ShoppingCart className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{summary?.today_transactions || 0}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Active Alerts</CardTitle>
-              <Bell className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-destructive">{summary?.active_alert_count || 0}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Low Stock Items</CardTitle>
-              <PackageX className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-yellow-500">{summary?.low_stock_count || 0}</div>
-            </CardContent>
-          </Card>
+          {statsCards.map((card) => (
+            <Card key={card.title}>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">{card.title}</CardTitle>
+                <card.icon className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className={card.valueClassName}>{card.value}</div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
 
         <div className="grid gap-4 md:grid-cols-3">
@@ -142,12 +206,15 @@ export default function Dashboard() {
               <p className="text-sm text-muted-foreground">
                 Review products that need replenishment before the next billing rush.
               </p>
-              <Link href="/inventory?low_stock_only=true">
-                <Button variant="outline" className="w-full justify-between">
-                  Open Low Stock Products
-                  <ArrowRight className="h-4 w-4" />
-                </Button>
-              </Link>
+              <Button
+                variant="outline"
+                className="w-full justify-between"
+                nativeButton={false}
+                render={<Link href="/inventory?low_stock_only=true" />}
+              >
+                Open Low Stock Products
+                <ArrowRight className="h-4 w-4" />
+              </Button>
             </CardContent>
           </Card>
           <Card>
@@ -158,12 +225,15 @@ export default function Dashboard() {
               <p className="text-sm text-muted-foreground">
                 Triage active alerts and keep resolved alerts visible in history.
               </p>
-              <Link href="/alerts">
-                <Button variant="outline" className="w-full justify-between">
-                  Open Active Alerts
-                  <ArrowRight className="h-4 w-4" />
-                </Button>
-              </Link>
+              <Button
+                variant="outline"
+                className="w-full justify-between"
+                nativeButton={false}
+                render={<Link href="/alerts" />}
+              >
+                Open Active Alerts
+                <ArrowRight className="h-4 w-4" />
+              </Button>
             </CardContent>
           </Card>
           <Card>
@@ -174,12 +244,15 @@ export default function Dashboard() {
               <p className="text-sm text-muted-foreground">
                 Ask the AI assistant about sales, low stock, and fresh vs stale analytics.
               </p>
-              <Link href="/ai-chat">
-                <Button variant="outline" className="w-full justify-between">
-                  Open AI Chat
-                  <ArrowRight className="h-4 w-4" />
-                </Button>
-              </Link>
+              <Button
+                variant="outline"
+                className="w-full justify-between"
+                nativeButton={false}
+                render={<Link href="/ai-chat" />}
+              >
+                Open AI Chat
+                <ArrowRight className="h-4 w-4" />
+              </Button>
             </CardContent>
           </Card>
         </div>
