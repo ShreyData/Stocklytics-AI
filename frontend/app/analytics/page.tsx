@@ -6,6 +6,7 @@ import { apiService } from '@/lib/api-service';
 import { useAuth } from '@/components/auth-provider';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { FreshnessBadge } from '@/components/freshness-badge';
+import { FreshnessNote } from '@/components/freshness-note';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { DashboardSummary, ProductPerformanceItem, SalesTrendPoint, CustomerInsight } from '@/lib/types';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -60,6 +61,7 @@ export default function Analytics() {
             <FreshnessBadge lastUpdatedAt={lastUpdated} status={freshness} />
           )}
         </div>
+        <FreshnessNote status={freshness} />
 
         {summary ? (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -102,9 +104,13 @@ export default function Analytics() {
             <TabsContent value="sales" className="mt-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Sales Trends</CardTitle>
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <CardTitle>Sales Trends</CardTitle>
+                    {lastUpdated ? <FreshnessBadge lastUpdatedAt={lastUpdated} status={freshness} /> : null}
+                  </div>
                 </CardHeader>
                 <CardContent>
+                  <FreshnessNote status={freshness} className="mb-4" />
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -137,9 +143,13 @@ export default function Analytics() {
             <TabsContent value="products" className="mt-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Product Performance</CardTitle>
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <CardTitle>Product Performance</CardTitle>
+                    {lastUpdated ? <FreshnessBadge lastUpdatedAt={lastUpdated} status={freshness} /> : null}
+                  </div>
                 </CardHeader>
                 <CardContent>
+                  <FreshnessNote status={freshness} className="mb-4" />
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -172,9 +182,13 @@ export default function Analytics() {
             <TabsContent value="customers" className="mt-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Customer Insights</CardTitle>
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <CardTitle>Customer Insights</CardTitle>
+                    {lastUpdated ? <FreshnessBadge lastUpdatedAt={lastUpdated} status={freshness} /> : null}
+                  </div>
                 </CardHeader>
                 <CardContent>
+                  <FreshnessNote status={freshness} className="mb-4" />
                   <Table>
                     <TableHeader>
                       <TableRow>

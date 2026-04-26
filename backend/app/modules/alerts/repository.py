@@ -19,6 +19,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import DocumentSnapshot
 
 from app.common.config import get_settings
+from app.common.google_clients import create_firestore_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def _get_db() -> firestore.AsyncClient:
     if _db is None:
         settings = get_settings()
         project = settings.firestore_project_id or None
-        _db = firestore.AsyncClient(project=project)
+        _db = create_firestore_async_client(project=project)
     return _db
 
 

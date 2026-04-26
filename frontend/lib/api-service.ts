@@ -2,13 +2,16 @@ import { apiClient } from './api';
 import {
   AIChatResponse,
   Alert,
+  AlertFilters,
   AlertsSummary,
   AnalyticsResponse,
   BillingCreateRequest,
   BillingCreateResponse,
+  ChatHistoryMessage,
   Customer,
   CustomerCreateRequest,
   CustomerInsight,
+  CustomerPurchaseHistoryItem,
   DashboardSummary,
   MeResponse,
   Product,
@@ -18,6 +21,8 @@ import {
   SalesTrendPoint,
   StockAdjustmentRequest,
 } from './types';
+import { useMocks } from './runtime';
+import { mockApi } from './mock-api';
 
 export const apiService = {
   // =========================================================================
@@ -25,6 +30,9 @@ export const apiService = {
   // =========================================================================
 
   getMe: async (): Promise<MeResponse> => {
+    if (useMocks) {
+      return mockApi.getMe();
+    }
     const res = await apiClient.get('/me');
     return res.data;
   },
@@ -36,6 +44,9 @@ export const apiService = {
   getProducts: async (
     storeId: string
   ): Promise<{ request_id: string; items: Product[]; next_page_token?: string | null }> => {
+    if (useMocks) {
+      return mockApi.getProducts();
+    }
     const res = await apiClient.get('/inventory/products', {
       params: { store_id: storeId },
     });
@@ -49,6 +60,9 @@ export const apiService = {
   getProduct: async (
     productId: string
   ): Promise<{ request_id: string; product: Product }> => {
+    if (useMocks) {
+      return mockApi.getProduct(productId);
+    }
     const res = await apiClient.get(`/inventory/products/${productId}`);
     return { request_id: res.data.request_id, product: res.data.product };
   },
@@ -56,6 +70,9 @@ export const apiService = {
   createProduct: async (
     data: ProductCreateRequest
   ): Promise<{ request_id: string; product: Product }> => {
+    if (useMocks) {
+      return mockApi.createProduct(data);
+    }
     const res = await apiClient.post('/inventory/products', data);
     return { request_id: res.data.request_id, product: res.data.product };
   },
@@ -64,6 +81,9 @@ export const apiService = {
     productId: string,
     data: ProductUpdateRequest
   ): Promise<{ request_id: string; product: Product }> => {
+    if (useMocks) {
+      return mockApi.updateProduct(productId, data);
+    }
     const res = await apiClient.patch(`/inventory/products/${productId}`, data);
     return { request_id: res.data.request_id, product: res.data.product };
   },
@@ -72,6 +92,9 @@ export const apiService = {
     productId: string,
     data: StockAdjustmentRequest
   ): Promise<{ request_id: string; adjustment_id: string }> => {
+    if (useMocks) {
+      return mockApi.adjustStock(productId, data);
+    }
     const res = await apiClient.post(
       `/inventory/products/${productId}/stock-adjustments`,
       data
@@ -89,6 +112,9 @@ export const apiService = {
   createTransaction: async (
     data: BillingCreateRequest
   ): Promise<BillingCreateResponse> => {
+    if (useMocks) {
+      return mockApi.createTransaction(data);
+    }
     const res = await apiClient.post('/billing/transactions', data);
     return res.data;
   },
@@ -98,6 +124,9 @@ export const apiService = {
   // =========================================================================
 
   getCustomers: async (): Promise<{ request_id: string; items: Customer[] }> => {
+    if (useMocks) {
+      return mockApi.getCustomers();
+    }
     const res = await apiClient.get('/customers');
     return { request_id: res.data.request_id, items: res.data.items || [] };
   },
@@ -105,8 +134,39 @@ export const apiService = {
   createCustomer: async (
     data: CustomerCreateRequest
   ): Promise<{ request_id: string; customer: Customer }> => {
+    if (useMocks) {
+      return mockApi.createCustomer(data);
+    }
     const res = await apiClient.post('/customers', data);
     return { request_id: res.data.request_id, customer: res.data.customer };
+  },
+
+  getCustomer: async (
+    customerId: string
+  ): Promise<{ request_id: string; customer: Customer }> => {
+    if (useMocks) {
+      return mockApi.getCustomer(customerId);
+    }
+    const res = await apiClient.get(`/customers/${customerId}`);
+    return { request_id: res.data.request_id, customer: res.data.customer };
+  },
+
+  getCustomerPurchaseHistory: async (
+    customerId: string
+  ): Promise<{
+    request_id: string;
+    customer_id: string;
+    transactions: CustomerPurchaseHistoryItem[];
+  }> => {
+    if (useMocks) {
+      return mockApi.getCustomerPurchaseHistory(customerId);
+    }
+    const res = await apiClient.get(`/customers/${customerId}/purchase-history`);
+    return {
+      request_id: res.data.request_id,
+      customer_id: res.data.customer_id,
+      transactions: res.data.transactions || [],
+    };
   },
 
   // =========================================================================
@@ -116,6 +176,9 @@ export const apiService = {
   getDashboardSummary: async (
     storeId: string
   ): Promise<AnalyticsResponse<DashboardSummary>> => {
+    if (useMocks) {
+      return mockApi.getDashboardSummary();
+    }
     const res = await apiClient.get('/analytics/dashboard', {
       params: { store_id: storeId },
     });
@@ -127,6 +190,9 @@ export const apiService = {
     range: '7d' | '30d' | '90d' = '30d',
     granularity: 'daily' | 'weekly' = 'daily'
   ): Promise<AnalyticsResponse<SalesTrendPoint>> => {
+    if (useMocks) {
+      return mockApi.getSalesTrends();
+    }
     const res = await apiClient.get('/analytics/sales-trends', {
       params: { store_id: storeId, range, granularity },
     });
@@ -136,6 +202,9 @@ export const apiService = {
   getProductPerformance: async (
     storeId: string
   ): Promise<AnalyticsResponse<ProductPerformanceItem>> => {
+    if (useMocks) {
+      return mockApi.getProductPerformance();
+    }
     const res = await apiClient.get('/analytics/product-performance', {
       params: { store_id: storeId },
     });
@@ -145,6 +214,9 @@ export const apiService = {
   getCustomerInsights: async (
     storeId: string
   ): Promise<AnalyticsResponse<CustomerInsight>> => {
+    if (useMocks) {
+      return mockApi.getCustomerInsights();
+    }
     const res = await apiClient.get('/analytics/customer-insights', {
       params: { store_id: storeId },
     });
@@ -156,10 +228,21 @@ export const apiService = {
   // =========================================================================
 
   getAlerts: async (
-    storeId: string
+    storeId: string,
+    filters: AlertFilters = {}
   ): Promise<{ request_id: string; items: Alert[] }> => {
+    if (useMocks) {
+      return mockApi.getAlerts(filters);
+    }
     const res = await apiClient.get('/alerts', {
-      params: { store_id: storeId },
+      params: {
+        store_id: storeId,
+        ...(filters.status && filters.status !== 'ALL' ? { status: filters.status } : {}),
+        ...(filters.alert_type && filters.alert_type !== 'ALL'
+          ? { alert_type: filters.alert_type }
+          : {}),
+        ...(filters.severity && filters.severity !== 'ALL' ? { severity: filters.severity } : {}),
+      },
     });
     return { request_id: res.data.request_id, items: res.data.items || [] };
   },
@@ -167,6 +250,9 @@ export const apiService = {
   getAlertsSummary: async (
     storeId: string
   ): Promise<{ request_id: string; summary: AlertsSummary }> => {
+    if (useMocks) {
+      return mockApi.getAlertsSummary();
+    }
     const res = await apiClient.get('/alerts/summary', {
       params: { store_id: storeId },
     });
@@ -177,6 +263,9 @@ export const apiService = {
     alertId: string,
     payload: { store_id: string; note?: string }
   ): Promise<{ request_id: string; alert: Partial<Alert> }> => {
+    if (useMocks) {
+      return mockApi.acknowledgeAlert(alertId);
+    }
     const res = await apiClient.post(`/alerts/${alertId}/acknowledge`, payload);
     return { request_id: res.data.request_id, alert: res.data.alert };
   },
@@ -185,6 +274,9 @@ export const apiService = {
     alertId: string,
     payload: { store_id: string; resolution_note?: string }
   ): Promise<{ request_id: string; alert: Partial<Alert> }> => {
+    if (useMocks) {
+      return mockApi.resolveAlert(alertId);
+    }
     const res = await apiClient.post(`/alerts/${alertId}/resolve`, payload);
     return { request_id: res.data.request_id, alert: res.data.alert };
   },
@@ -198,6 +290,9 @@ export const apiService = {
     chatSessionId: string,
     query: string
   ): Promise<AIChatResponse> => {
+    if (useMocks) {
+      return mockApi.askAI(storeId, chatSessionId, query);
+    }
     const res = await apiClient.post('/ai/chat', {
       store_id: storeId,
       chat_session_id: chatSessionId,
@@ -211,8 +306,11 @@ export const apiService = {
   ): Promise<{
     request_id: string;
     chat_session_id: string;
-    messages: Array<{ role: 'user' | 'assistant'; text: string; created_at: string }>;
+    messages: ChatHistoryMessage[];
   }> => {
+    if (useMocks) {
+      return mockApi.getChatSessionHistory(chatSessionId);
+    }
     const res = await apiClient.get(`/ai/chat/sessions/${chatSessionId}`);
     return res.data;
   },

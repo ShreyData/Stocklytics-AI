@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { AUTH_TOKEN_KEY } from './auth-storage';
 
 const baseURL = process.env.NEXT_PUBLIC_API_BASE_URL || '/api/v1';
 
@@ -13,7 +14,7 @@ export const apiClient = axios.create({
 apiClient.interceptors.request.use(
   (config) => {
     const token = typeof window !== 'undefined'
-      ? localStorage.getItem('auth_token')
+      ? localStorage.getItem(AUTH_TOKEN_KEY)
       : null;
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
