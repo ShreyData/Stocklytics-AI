@@ -13,12 +13,17 @@ Usage:
 import asyncio
 import logging
 import sys
+from datetime import datetime, timezone
 
 from google.cloud import bigquery
 from google.cloud import firestore
 
 from app.common.config import setup_logging, get_settings
 from app.modules.data_pipeline import transform_runner, repository
+from app.modules.data_pipeline.schemas import (
+    PIPELINE_RUN_TYPE_INCREMENTAL_SYNC,
+    PIPELINE_RUN_TYPE_MART_REFRESH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,14 @@ async def _get_active_store_ids(db: firestore.AsyncClient) -> list[str]:
     async for doc in db.collection("stores").stream():
         stores.append(doc.id)
     return stores
+
+
+def _to_utc_datetime(value):
+    if hasattr(value, "seconds"):
+        return datetime.fromtimestamp(value.seconds, tz=timezone.utc)
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    return None
 
 
 async def main() -> None:
@@ -45,34 +58,40 @@ async def main() -> None:
 
         for store_id in stores:
             try:
-                # Resolve the source window by finding the last successful pipeline run.
-                # In MVP, this relies on sync completing recently.
-                last_run = await repository.get_last_successful_run(db, store_id=store_id)
-                
-                if not last_run or not last_run.get("checkpoint_end"):
+                # Transforms must be sourced from a successful incremental sync run.
+                last_sync_run = await repository.get_last_successful_run(
+                    db,
+                    store_id=store_id,
+                    run_type=PIPELINE_RUN_TYPE_INCREMENTAL_SYNC,
+                )
+                if not last_sync_run or not last_sync_run.get("checkpoint_end"):
                     logger.warning(f"No successful sync run found for store {store_id}, skipping transform")
                     continue
-                
-                # Firestore returns DatetimeWithNanoseconds for timestamps
-                raw_end = last_run["checkpoint_end"]
-                from datetime import datetime, timezone
-                if hasattr(raw_end, "seconds"):
-                    checkpoint_end = datetime.fromtimestamp(raw_end.seconds, tz=timezone.utc)
-                elif isinstance(raw_end, datetime):
-                    checkpoint_end = raw_end.replace(tzinfo=timezone.utc) if raw_end.tzinfo is None else raw_end
-                else:
+
+                checkpoint_end = _to_utc_datetime(last_sync_run.get("checkpoint_end"))
+                if checkpoint_end is None:
                     logger.warning(f"Invalid checkpoint type for store {store_id}, skipping")
                     continue
 
-                # The start doesn't matter strictly for BigQuery mart refreshes (we refresh the whole day),
-                # but we need it for metadata.
-                raw_start = last_run.get("checkpoint_start")
-                if hasattr(raw_start, "seconds"):
-                    checkpoint_start = datetime.fromtimestamp(raw_start.seconds, tz=timezone.utc)
-                elif isinstance(raw_start, datetime):
-                    checkpoint_start = raw_start.replace(tzinfo=timezone.utc) if raw_start.tzinfo is None else raw_start
-                else:
+                checkpoint_start = _to_utc_datetime(last_sync_run.get("checkpoint_start"))
+                if checkpoint_start is None:
                     checkpoint_start = datetime.now(tz=timezone.utc)
+
+                # Avoid re-running transform for the same source window repeatedly.
+                last_transform_run = await repository.get_last_successful_run(
+                    db,
+                    store_id=store_id,
+                    run_type=PIPELINE_RUN_TYPE_MART_REFRESH,
+                )
+                transformed_end = _to_utc_datetime(
+                    (last_transform_run or {}).get("checkpoint_end")
+                )
+                if transformed_end is not None and transformed_end >= checkpoint_end:
+                    logger.info(
+                        "No new successful sync window to transform; skipping",
+                        extra={"store_id": store_id, "checkpoint_end": checkpoint_end.isoformat()},
+                    )
+                    continue
 
                 run_id = await transform_runner.run_mart_refresh(
                     db, bq,
