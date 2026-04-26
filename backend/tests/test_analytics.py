@@ -34,6 +34,27 @@ MOCK_DASHBOARD_SUMMARY = {
 
 
 class TestAnalyticsAPI:
+    def test_live_dashboard_success(self):
+        live_summary = {
+            "today_sales": 568.0,
+            "today_transactions": 2,
+            "active_alert_count": 1,
+            "low_stock_count": 3,
+            "top_selling_product": "Amul Gold 500ml",
+        }
+        with patch(
+            "app.modules.analytics.repository.AnalyticsRepository.get_live_dashboard_summary",
+            new_callable=AsyncMock,
+            return_value=live_summary,
+        ):
+            response = client.get("/api/v1/analytics/dashboard/live", headers=AUTH_HEADER)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "request_id" in body
+        assert body["freshness_status"] == "fresh"
+        assert body["summary"] == live_summary
+
     def test_dashboard_success(self):
         with (
             patch("app.modules.analytics.repository.AnalyticsRepository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),

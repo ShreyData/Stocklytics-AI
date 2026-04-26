@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from app.common.config import get_settings
 from app.common.exceptions import NotFoundError, ValidationError as AppValidationError
-from app.modules.alerts.engine import evaluate_low_stock
+from app.modules.alerts.engine import evaluate_expiry_soon, evaluate_low_stock
 from app.modules.inventory import repository
 from app.modules.inventory.schemas import (
     EXPIRY_STATUS_EXPIRED,
@@ -92,55 +92,52 @@ def _firestore_to_response(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _schedule_low_stock_evaluation(
+def _should_skip_alert_hooks() -> bool:
+    settings = get_settings()
+    return settings.is_local and not settings.firestore_project_id
+
+
+async def _run_inventory_alert_evaluations(
     *,
     store_id: str,
     product_id: str,
     product_name: str,
     current_stock: int,
     reorder_threshold: int,
+    expiry_date: Optional[datetime],
 ) -> None:
     """
-    Schedule post-adjustment low-stock evaluation without blocking the response.
+    Run inventory-driven alert evaluations after writes commit.
 
-    In local mode without Firestore configured, skip the cross-module hook so
-    backend tests and bootstrap checks do not accidentally hit live dependencies.
+    We evaluate both LOW_STOCK and EXPIRY_SOON so product edits and stock
+    movements keep the alerts collection aligned with operational truth.
     """
-    settings = get_settings()
-    if settings.is_local and not settings.firestore_project_id:
+    if _should_skip_alert_hooks():
         logger.info(
-            "Skipping low-stock evaluation in local mode because Firestore is not configured",
+            "Skipping inventory alert evaluations in local mode because Firestore is not configured",
             extra={"store_id": store_id, "product_id": product_id},
         )
         return
-
-    import asyncio  # noqa: PLC0415
-
-    async def _run() -> None:
-        try:
-            await evaluate_low_stock(
-                store_id=store_id,
-                product_id=product_id,
-                product_name=product_name,
-                current_stock=current_stock,
-                reorder_threshold=reorder_threshold,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "Low-stock evaluation failed after stock adjustment",
-                extra={"store_id": store_id, "product_id": product_id},
-            )
-
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        logger.warning(
-            "No running event loop available for low-stock evaluation",
+        await evaluate_low_stock(
+            store_id=store_id,
+            product_id=product_id,
+            product_name=product_name,
+            current_stock=current_stock,
+            reorder_threshold=reorder_threshold,
+        )
+        await evaluate_expiry_soon(
+            store_id=store_id,
+            product_id=product_id,
+            product_name=product_name,
+            expiry_date=expiry_date,
+            current_stock=current_stock,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Inventory alert evaluation failed",
             extra={"store_id": store_id, "product_id": product_id},
         )
-        return
-
-    loop.create_task(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +179,14 @@ async def create_product(
     }
 
     stored = await repository.create_product(product_id, document)
+    await _run_inventory_alert_evaluations(
+        store_id=store_id,
+        product_id=product_id,
+        product_name=payload.name,
+        current_stock=payload.quantity,
+        reorder_threshold=payload.reorder_threshold,
+        expiry_date=payload.expiry_date,
+    )
     return _firestore_to_response(stored)
 
 
@@ -289,6 +294,14 @@ async def update_product(
             f"Product '{product_id}' not found.",
             details={"product_id": product_id},
         )
+    await _run_inventory_alert_evaluations(
+        store_id=store_id,
+        product_id=product_id,
+        product_name=str(updated.get("name", existing.get("name", "Unknown Product"))),
+        current_stock=int(updated.get("quantity_on_hand", existing.get("quantity_on_hand", 0))),
+        reorder_threshold=int(updated.get("reorder_threshold", existing.get("reorder_threshold", 0))),
+        expiry_date=updated.get("expiry_date"),
+    )
     return _firestore_to_response(updated)
 
 
@@ -370,8 +383,7 @@ async def apply_stock_adjustment(
 
     # Fetch product details to evaluate alert condition
     try:
-        settings = get_settings()
-        if settings.is_local and not settings.firestore_project_id:
+        if _should_skip_alert_hooks():
             logger.info(
                 "Skipping post-adjustment product lookup in local mode because Firestore is not configured",
                 extra={"store_id": store_id, "product_id": product_id},
@@ -385,17 +397,16 @@ async def apply_stock_adjustment(
 
         product_data = await repository.get_product_by_id(product_id)
         if product_data:
-            reorder_thresh = int(product_data.get("reorder_threshold", 0))
-            product_name = product_data.get("name", "Unknown Product")
-            _schedule_low_stock_evaluation(
+            await _run_inventory_alert_evaluations(
                 store_id=store_id,
                 product_id=product_id,
-                product_name=product_name,
+                product_name=str(product_data.get("name", "Unknown Product")),
                 current_stock=new_quantity,
-                reorder_threshold=reorder_thresh,
+                reorder_threshold=int(product_data.get("reorder_threshold", 0)),
+                expiry_date=product_data.get("expiry_date"),
             )
     except Exception as e:
-        logger.error(f"Failed to trigger LOW_STOCK alert evaluation: {e}")
+        logger.error(f"Failed to trigger inventory alert evaluation: {e}")
 
     return {
         "product_id": product_id,

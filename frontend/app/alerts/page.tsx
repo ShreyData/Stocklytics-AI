@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { format } from 'date-fns';
 import { AlertTriangle } from 'lucide-react';
 import { AppLayout } from '@/components/app-layout';
@@ -13,6 +13,7 @@ import { apiService } from '@/lib/api-service';
 import { Alert, AlertFilters } from '@/lib/types';
 import { getErrorMessage } from '@/lib/errors';
 import { toast } from 'sonner';
+import { subscribeToDataChanged } from '@/lib/data-events';
 
 const defaultFilters: AlertFilters = {
   status: 'ALL',
@@ -27,32 +28,54 @@ export default function Alerts() {
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [filters, setFilters] = useState<AlertFilters>(defaultFilters);
 
+  const loadAlerts = useCallback(
+    async (showLoader = false) => {
+      if (!storeId) {
+        return;
+      }
+      if (showLoader) {
+        setLoading(true);
+      }
+      try {
+        const res = await apiService.getAlerts(storeId, filters);
+        setAlerts(res.items);
+      } catch (error) {
+        if (showLoader) {
+          toast.error(getErrorMessage(error, 'Failed to load alerts.'));
+        }
+      } finally {
+        if (showLoader) {
+          setLoading(false);
+        }
+      }
+    },
+    [filters, storeId]
+  );
+
   useEffect(() => {
     if (!storeId) {
       return;
     }
 
-    async function loadAlerts() {
-      setLoading(true);
-      try {
-        const res = await apiService.getAlerts(storeId, filters);
-        setAlerts(res.items);
-      } catch (error) {
-        toast.error(getErrorMessage(error, 'Failed to load alerts.'));
-      } finally {
-        setLoading(false);
-      }
-    }
+    void loadAlerts(true);
+    const unsubscribe = subscribeToDataChanged(() => {
+      void loadAlerts(false);
+    });
+    const intervalId = window.setInterval(() => {
+      void loadAlerts(false);
+    }, 15000);
 
-    void loadAlerts();
-  }, [storeId, filters]);
+    return () => {
+      unsubscribe();
+      window.clearInterval(intervalId);
+    };
+  }, [loadAlerts, storeId]);
 
   async function withActionLoading(alertId: string, action: () => Promise<void>) {
     setActionLoading((prev) => ({ ...prev, [alertId]: true }));
     try {
       await action();
-      const res = await apiService.getAlerts(storeId, filters);
-      setAlerts(res.items);
+      await loadAlerts(false);
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to update alert.'));
     } finally {

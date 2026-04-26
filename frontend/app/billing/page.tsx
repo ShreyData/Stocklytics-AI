@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { AppLayout } from '@/components/app-layout';
 import { apiService } from '@/lib/api-service';
 import { useAuth } from '@/components/auth-provider';
@@ -26,35 +26,36 @@ export default function Billing() {
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [idempotencyKey, setIdempotencyKey] = useState(uuidv4());
 
-  useEffect(() => {
+  const fetchData = useCallback(async () => {
     if (!storeId) return;
 
-    const fetchData = async () => {
-      const [productsRes, customersRes] = await Promise.allSettled([
-        apiService.getProducts(storeId),
-        apiService.getCustomers(),
-      ]);
+    const [productsRes, customersRes] = await Promise.allSettled([
+      apiService.getProducts(storeId),
+      apiService.getCustomers(),
+    ]);
 
-      if (productsRes.status === 'fulfilled') {
-        setProducts(productsRes.value.items);
-      } else {
-        setProducts([]);
-        toast.error(
-          getErrorMessage(productsRes.reason, 'Failed to load products for billing.')
-        );
-      }
+    if (productsRes.status === 'fulfilled') {
+      setProducts(productsRes.value.items);
+    } else {
+      setProducts([]);
+      toast.error(
+        getErrorMessage(productsRes.reason, 'Failed to load products for billing.')
+      );
+    }
 
-      if (customersRes.status === 'fulfilled') {
-        setCustomers(customersRes.value.items);
-      } else {
-        setCustomers([]);
-        toast.error(
-          getErrorMessage(customersRes.reason, 'Failed to load customers for billing.')
-        );
-      }
-    };
-    fetchData();
+    if (customersRes.status === 'fulfilled') {
+      setCustomers(customersRes.value.items);
+    } else {
+      setCustomers([]);
+      toast.error(
+        getErrorMessage(customersRes.reason, 'Failed to load customers for billing.')
+      );
+    }
   }, [storeId]);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
 
   const addToCart = (product: Product) => {
     setCart((prev) => {
@@ -123,6 +124,7 @@ export default function Billing() {
       toast.success(message);
       setCart([]);
       setIdempotencyKey(uuidv4());
+      await fetchData();
     } catch (error) {
       toast.error(getBillingFailureMessage(error));
     } finally {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AppLayout } from '@/components/app-layout';
 import { apiService } from '@/lib/api-service';
 import { useAuth } from '@/components/auth-provider';
@@ -12,6 +12,7 @@ import { DashboardSummary, ProductPerformanceItem, SalesTrendPoint, CustomerInsi
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { getErrorMessage } from '@/lib/errors';
 import { toast } from 'sonner';
+import { subscribeToDataChanged } from '@/lib/data-events';
 
 export default function Analytics() {
   const { storeId } = useAuth();
@@ -23,34 +24,56 @@ export default function Analytics() {
   const [freshness, setFreshness] = useState<'fresh' | 'delayed' | 'stale'>('fresh');
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (!storeId) return;
-
-    const fetchAnalytics = async () => {
-      try {
+  const fetchAnalytics = useCallback(
+    async (showLoader = false) => {
+      if (!storeId) return;
+      if (showLoader) {
         setLoading(true);
-        const [dashboardRes, salesRes, productRes, customerRes] = await Promise.all([
-          apiService.getDashboardSummary(storeId),
-          apiService.getSalesTrends(storeId),
-          apiService.getProductPerformance(storeId),
-          apiService.getCustomerInsights(storeId),
+      }
+
+      try {
+        const [liveSummaryRes, salesRes, productRes, customerRes] = await Promise.all([
+          apiService.getLiveDashboardSummary(storeId),
+          apiService.getLiveSalesTrends(storeId),
+          apiService.getLiveProductPerformance(storeId),
+          apiService.getLiveCustomerInsights(storeId),
         ]);
 
-        setSummary(dashboardRes.summary || null);
+        setSummary(liveSummaryRes.summary || null);
         setSalesPoints(salesRes.points || []);
         setProductItems(productRes.items || []);
         setTopCustomers(customerRes.top_customers || []);
-        setLastUpdated(dashboardRes.analytics_last_updated_at);
-        setFreshness(dashboardRes.freshness_status);
+        setLastUpdated(salesRes.analytics_last_updated_at);
+        setFreshness(salesRes.freshness_status);
       } catch (error) {
-        toast.error(getErrorMessage(error, 'Failed to load analytics.'));
+        if (showLoader) {
+          toast.error(getErrorMessage(error, 'Failed to load analytics.'));
+        }
       } finally {
-        setLoading(false);
+        if (showLoader) {
+          setLoading(false);
+        }
       }
-    };
+    },
+    [storeId]
+  );
 
-    fetchAnalytics();
-  }, [storeId]);
+  useEffect(() => {
+    if (!storeId) return;
+
+    void fetchAnalytics(true);
+    const unsubscribe = subscribeToDataChanged(() => {
+      void fetchAnalytics(false);
+    });
+    const intervalId = window.setInterval(() => {
+      void fetchAnalytics(false);
+    }, 30000);
+
+    return () => {
+      unsubscribe();
+      window.clearInterval(intervalId);
+    };
+  }, [fetchAnalytics, storeId]);
 
   return (
     <AppLayout>

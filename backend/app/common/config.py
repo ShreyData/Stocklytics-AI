@@ -5,8 +5,15 @@ Central place for all config values. Import this module wherever settings are ne
 
 import os
 from functools import lru_cache
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from app.common.logging_config import configure_logging
+
+
+_BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(_BACKEND_ENV_PATH)
 
 
 class Settings:
