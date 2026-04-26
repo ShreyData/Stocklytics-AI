@@ -1,5 +1,5 @@
 """
-Platform endpoints for RetailMind AI.
+Platform endpoints for Stocklytics AI.
 
 Exposes:
     GET /api/v1/health   – liveness check (no auth required)
@@ -11,15 +11,21 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, status
-from fastapi.responses import JSONResponse
 
 from app.common.auth import AuthenticatedUser, require_auth
 from app.common.config import get_settings
+from app.common.exceptions import ServiceUnavailableError
 from app.common.responses import success_response
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Platform"])
+
+
+class DependenciesNotReadyError(ServiceUnavailableError):
+    """Raised when one or more backend readiness probes fail."""
+
+    error_code = "DEPENDENCIES_NOT_READY"
 
 
 # ---------------------------------------------------------------------------
@@ -180,12 +186,9 @@ async def readiness_check():
 
     if has_error:
         logger.warning("Readiness check failed", extra={"dependencies": dependencies})
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={
-                "status": "not_ready",
-                "dependencies": dependencies,
-            },
+        raise DependenciesNotReadyError(
+            "One or more backend dependencies are not ready.",
+            details={"dependencies": dependencies},
         )
 
     logger.info("Readiness check completed", extra={"dependencies": dependencies})

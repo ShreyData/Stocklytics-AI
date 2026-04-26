@@ -18,7 +18,7 @@ from google.cloud import bigquery
 from google.cloud import firestore
 
 from app.common.config import setup_logging, get_settings
-from app.modules.data_pipeline import sync_runner
+from app.modules.data_pipeline import repository, sync_runner
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,17 @@ async def main() -> None:
 
         for store_id in stores:
             try:
+                active = await repository.get_active_run_for_store(db, store_id=store_id)
+                if active:
+                    logger.info(
+                        "Skipping sync because a pipeline run is already active",
+                        extra={
+                            "store_id": store_id,
+                            "active_pipeline_run_id": active.get("pipeline_run_id"),
+                        },
+                    )
+                    continue
+
                 # Fire-and-forget sync for each store sequentially
                 # In a larger system, we might use asyncio.gather or pub/sub fanout
                 run_id = await sync_runner.run_incremental_sync(db, bq, store_id=store_id)

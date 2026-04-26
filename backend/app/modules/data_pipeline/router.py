@@ -14,7 +14,7 @@ import logging
 from fastapi import APIRouter, Depends, Path
 
 from app.common.auth import AuthenticatedUser, require_admin, require_auth
-from app.common.exceptions import ForbiddenError
+from app.common.exceptions import ForbiddenError, ValidationError
 from app.common.responses import success_response
 from app.modules.data_pipeline import service
 from app.modules.data_pipeline.schemas import PipelineSyncRequest
@@ -44,10 +44,12 @@ async def trigger_pipeline_sync(
     """
     # Enforce request store_id matches authenticated token's store
     if request.store_id != user.store_id:
-        from app.common.exceptions import ForbiddenError # noqa: PLC0415
-        raise ForbiddenError(
-            "Request store_id does not match token scope.",
-            details={"error_code": "FORBIDDEN"},
+        raise ValidationError(
+            "store_id in request must match authenticated store scope.",
+            details={
+                "request_store_id": request.store_id,
+                "auth_store_id": user.store_id,
+            },
         )
         
     result = await service.trigger_sync(store_id=user.store_id)

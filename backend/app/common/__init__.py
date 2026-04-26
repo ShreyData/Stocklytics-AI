@@ -1,5 +1,5 @@
 """
-common package – shared utilities for RetailMind AI backend.
+common package – shared utilities for Stocklytics AI backend.
 
 Public surface:
     config          – application settings

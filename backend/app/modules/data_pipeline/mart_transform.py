@@ -3,11 +3,11 @@ Data Pipeline Module – Mart Transform Runner.
 
 Refreshes the five BigQuery mart tables from the raw tables:
 
-    retailmind_mart.sales_daily
-    retailmind_mart.product_sales_daily
-    retailmind_mart.customer_summary
-    retailmind_mart.inventory_health
-    retailmind_mart.dashboard_summary
+    stocklytics_mart.sales_daily
+    stocklytics_mart.product_sales_daily
+    stocklytics_mart.customer_summary
+    stocklytics_mart.inventory_health
+    stocklytics_mart.dashboard_summary
 
 Table schemas and field names match database_design.md §4 exactly.
 
@@ -50,7 +50,7 @@ def refresh_sales_daily(
     analytics_last_updated_at: str,
 ) -> None:
     """
-    Refresh retailmind_mart.sales_daily for the given store.
+    Refresh stocklytics_mart.sales_daily for the given store.
 
     Aggregates transactions_raw by sale_date.
     Existing rows for the same (store_id, sales_date) are replaced.
@@ -95,7 +95,7 @@ def refresh_product_sales_daily(
     analytics_last_updated_at: str,
 ) -> None:
     """
-    Refresh retailmind_mart.product_sales_daily for the given store.
+    Refresh stocklytics_mart.product_sales_daily for the given store.
 
     Joins transaction_items_raw with transactions_raw for the sale date.
     """
@@ -139,7 +139,7 @@ def refresh_customer_summary(
     store_id: str,
     analytics_last_updated_at: str,
 ) -> None:
-    """Refresh retailmind_mart.customer_summary for the given store."""
+    """Refresh stocklytics_mart.customer_summary for the given store."""
     project = _settings.bigquery_project_id
     raw = _settings.bigquery_dataset_raw
     mart = _settings.bigquery_dataset_mart
@@ -182,7 +182,7 @@ def refresh_inventory_health(
     analytics_last_updated_at: str,
 ) -> None:
     """
-    Refresh retailmind_mart.inventory_health.
+    Refresh stocklytics_mart.inventory_health.
 
     Uses the latest inventory snapshot per product.
     Computes days_to_expiry and is_low_stock flags.
@@ -232,7 +232,7 @@ def refresh_dashboard_summary(
     analytics_last_updated_at: str,
 ) -> None:
     """
-    Refresh retailmind_mart.dashboard_summary.
+    Refresh stocklytics_mart.dashboard_summary.
 
     Derives today's top-level KPIs from the other mart tables.
     """

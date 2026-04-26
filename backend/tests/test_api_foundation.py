@@ -12,6 +12,7 @@ Run with: pytest backend/tests/ -v
 
 import pytest
 from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock, patch
 
 from app.main import app
 
@@ -83,6 +84,20 @@ class TestReadyEndpoint:
         response = client.get("/api/v1/ready")
         assert "x-request-id" in response.headers
 
+    def test_ready_returns_shared_error_shape_when_dependency_not_ready(self):
+        with patch(
+            "app.api.platform._probe_firestore",
+            new_callable=AsyncMock,
+            return_value="error",
+        ):
+            response = client.get("/api/v1/ready")
+
+        assert response.status_code == 503
+        body = response.json()
+        assert_error_shape(body)
+        assert body["error"]["code"] == "DEPENDENCIES_NOT_READY"
+        assert body["error"]["details"]["dependencies"]["firestore"] == "error"
+
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/me
@@ -135,6 +150,8 @@ class TestErrorFormat:
         """FastAPI 404 for unknown routes should still follow error conventions."""
         response = client.get("/api/v1/does-not-exist")
         assert response.status_code == 404
+        assert_error_shape(response.json())
+        assert response.json()["error"]["code"] == "NOT_FOUND"
 
     def test_401_error_has_correct_shape(self):
         response = client.get("/api/v1/me")
