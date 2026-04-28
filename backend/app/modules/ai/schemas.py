@@ -21,6 +21,10 @@ class ChatRequest(BaseModel):
     store_id: str = Field(..., description="The store scoped to this request.")
     chat_session_id: str = Field(..., description="Unique identifier for the chat session.")
     query: str = Field(..., min_length=1, description="The business question asked by the user.")
+    model_id: Optional[str] = Field(
+        default=None,
+        description="Optional generation model override. Example: gemini-2.0-flash or gemma-4-26b-a4b-it.",
+    )
 
 
 class EmbedSyncRequest(BaseModel):

@@ -4,8 +4,6 @@ steps:
       - build
       - -f
       - frontend/Dockerfile
-      - -t
-      - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-frontend:${_IMAGE_TAG}
       - --build-arg
       - BACKEND_URL=${_BACKEND_URL}
       - --build-arg
@@ -28,6 +26,7 @@ steps:
       - NEXT_PUBLIC_FIREBASE_APP_ID=${_NEXT_PUBLIC_FIREBASE_APP_ID}
       - --build-arg
       - APP_URL=${_APP_URL}
+      - -t
       - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-frontend:${_IMAGE_TAG}
       - frontend
 

@@ -56,6 +56,7 @@ async def post_chat(
         user_id=user.user_id,
         chat_session_id=body.chat_session_id,
         query=body.query,
+        model_id=body.model_id,
     )
     return success_response(result, status_code=200)
 

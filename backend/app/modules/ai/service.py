@@ -26,7 +26,7 @@ import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 
@@ -235,6 +235,94 @@ def _query_contains_phrase(query: str, phrases: tuple[str, ...]) -> bool:
     return any(phrase in lowered for phrase in phrases)
 
 
+IntentName = Literal[
+    "product_lookup",
+    "sales_kpi",
+    "inventory_risk",
+    "reorder_decision",
+    "customer_insight",
+    "transaction_lookup",
+    "reasoning",
+    "general",
+]
+
+
+def _detect_intent(query: str) -> IntentName:
+    lowered = query.lower()
+
+    if _query_contains_phrase(
+        lowered,
+        (
+            "which product should i order",
+            "what should i order",
+            "what should i restock",
+            "reorder",
+            "restock",
+        ),
+    ):
+        return "reorder_decision"
+
+    if _query_contains_phrase(
+        lowered,
+        (
+            "top selling",
+            "top-selling",
+            "best selling",
+            "highest selling",
+            "today sale",
+            "today's sale",
+            "today sales",
+            "today's sales",
+            "revenue",
+            "transactions today",
+        ),
+    ):
+        return "sales_kpi"
+
+    if _query_mentions_customers(query):
+        return "customer_insight"
+
+    if _query_mentions_transactions(query):
+        return "transaction_lookup"
+
+    if _query_contains_phrase(
+        lowered,
+        (
+            "what needs attention",
+            "what should i focus on",
+            "priority",
+            "risk",
+            "alert",
+            "low stock",
+            "inventory status",
+        ),
+    ):
+        return "inventory_risk"
+
+    if _query_mentions_any(
+        query,
+        {"product", "products", "stock", "inventory", "item", "items", "about"},
+    ):
+        return "product_lookup"
+
+    if _query_requests_deeper_reasoning(query):
+        return "reasoning"
+
+    return "general"
+
+
+def _intent_needs_customers(intent: IntentName, query: str) -> bool:
+    return intent in {"customer_insight"} or _query_mentions_customers(query)
+
+
+def _intent_needs_transactions(intent: IntentName, query: str) -> bool:
+    return intent in {"transaction_lookup", "reasoning"} or _query_mentions_transactions(query)
+
+
+def _intent_needs_product_focus(intent: IntentName) -> bool:
+    return intent in {"product_lookup", "inventory_risk", "reorder_decision", "reasoning"}
+
+
 def _safe_float(value: Any) -> float:
     try:
         return float(value)
@@ -414,6 +502,107 @@ def _build_sales_answer(query: str, analytics_context: dict[str, Any]) -> Option
     return " ".join(parts)
 
 
+def _build_top_selling_product_answer(
+    query: str,
+    analytics_context: dict[str, Any],
+) -> Optional[str]:
+    top_seller_phrases = (
+        "top selling",
+        "top-selling",
+        "best selling",
+        "best-selling",
+        "highest selling",
+        "most sold",
+    )
+    if not _query_contains_phrase(query, top_seller_phrases):
+        return None
+
+    summary = analytics_context.get("dashboard_summary") or {}
+    if not summary:
+        return "I could not load the current sales summary, so I cannot confirm the top-selling product right now."
+
+    top_product = summary.get("top_selling_product")
+    today_sales = _safe_float(summary.get("today_sales"))
+    today_transactions = _safe_int(summary.get("today_transactions"))
+    if not top_product or str(top_product).strip().lower() == "unknown":
+        return "I can see the current sales snapshot, but it does not identify a top-selling product yet."
+
+    parts = [f"{top_product} is the current top-selling product."]
+    if today_sales > 0 or today_transactions > 0:
+        parts.append(
+            f"Today's store snapshot shows {today_sales:.0f} in sales across {today_transactions} transactions."
+        )
+    parts.append("Keep that item in stock and visible because it is leading sales right now.")
+    return " ".join(parts)
+
+
+def _build_reorder_recommendation_answer(
+    query: str,
+    inventory: list[dict[str, Any]],
+    analytics_context: dict[str, Any],
+) -> Optional[str]:
+    reorder_terms = {"order", "reorder", "restock", "buy", "purchase"}
+    if not _query_mentions_any(query, reorder_terms) and not _query_contains_phrase(
+        query,
+        ("which product should i order", "what should i order", "what should i restock"),
+    ):
+        return None
+
+    if not inventory:
+        return "I could not load the inventory snapshot, so I cannot recommend a restock priority right now."
+
+    active_products = [product for product in inventory if str(product.get("status", "ACTIVE")).upper() == "ACTIVE"]
+    low_stock = [
+        product for product in active_products
+        if _safe_int(product.get("reorder_threshold")) > 0
+        and _safe_int(product.get("quantity_on_hand")) <= _safe_int(product.get("reorder_threshold"))
+    ]
+    low_stock.sort(
+        key=lambda product: (
+            _safe_int(product.get("quantity_on_hand")) - _safe_int(product.get("reorder_threshold")),
+            _safe_int(product.get("quantity_on_hand")),
+        )
+    )
+
+    summary = analytics_context.get("dashboard_summary") or {}
+    top_product = str(summary.get("top_selling_product") or "").strip()
+
+    matching_top_product: Optional[dict[str, Any]] = None
+    if top_product:
+        for product in active_products:
+            if str(product.get("name", "")).strip().lower() == top_product.lower():
+                matching_top_product = product
+                break
+
+    if matching_top_product and _safe_int(matching_top_product.get("reorder_threshold")) > 0:
+        quantity = _safe_int(matching_top_product.get("quantity_on_hand"))
+        reorder_threshold = _safe_int(matching_top_product.get("reorder_threshold"))
+        if quantity <= reorder_threshold:
+            return (
+                f"You should reorder {matching_top_product.get('name', matching_top_product.get('product_id', 'this product'))} first. "
+                f"It is currently your top-selling product and has {quantity} units on hand against a reorder threshold of {reorder_threshold}. "
+                "Protecting availability on that fast mover is the highest-priority replenishment action."
+            )
+
+    if low_stock:
+        recommended = low_stock[0]
+        quantity = _safe_int(recommended.get("quantity_on_hand"))
+        reorder_threshold = _safe_int(recommended.get("reorder_threshold"))
+        return (
+            f"You should reorder {recommended.get('name', recommended.get('product_id', 'this product'))} first. "
+            f"It has {quantity} units on hand against a reorder threshold of {reorder_threshold}, which makes it the weakest stock position in the current snapshot. "
+            "That is the clearest restock priority right now."
+        )
+
+    if top_product:
+        return (
+            f"{top_product} is the safest product to keep watching for replenishment because it is currently leading sales. "
+            "The current snapshot does not show any urgent product below reorder threshold right now."
+        )
+
+    return "I do not see an urgent reorder priority in the current inventory snapshot, because no active product is currently below its reorder threshold."
+
+
 def _rank_customers(customers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def spend(customer: dict[str, Any]) -> float:
         return _safe_float(customer.get("lifetime_spend", customer.get("total_spend", 0.0)))
@@ -541,11 +730,26 @@ def _query_prefers_operator_answer(query: str) -> bool:
                 "status",
                 "focus",
                 "priority",
+                "order",
+                "reorder",
+                "restock",
+                "buy",
+                "purchase",
             },
         )
         or _query_contains_phrase(
             query,
-            ("what needs attention", "what should i focus on", "new product", "inventory status"),
+            (
+                "what needs attention",
+                "what should i focus on",
+                "new product",
+                "inventory status",
+                "top selling",
+                "top-selling",
+                "best selling",
+                "which product should i order",
+                "what should i order",
+            ),
         )
     )
 
@@ -591,6 +795,8 @@ def _build_operator_answer_result(
     transactions: list[dict[str, Any]],
 ) -> tuple[Optional[str], bool]:
     builders: tuple[tuple[Any, bool], ...] = (
+        (lambda q, i: _build_top_selling_product_answer(q, analytics_context), True),
+        (lambda q, i: _build_reorder_recommendation_answer(q, inventory, analytics_context), True),
         (_build_recent_product_answer, False),
         (lambda q, i: _build_focus_answer(q, analytics_context, alerts, inventory), False),
         (lambda q, i: _build_inventory_status_answer(q, inventory, alerts), False),
@@ -921,7 +1127,13 @@ async def _embed_query(query: str) -> Optional[list[float]]:
     return None
 
 
-async def _generate_model_answer(prompt: str) -> str:
+async def _generate_model_answer(
+    prompt: str,
+    *,
+    preferred_model: Optional[str] = None,
+    fallback_models: Optional[list[str]] = None,
+    max_output_tokens: int = 220,
+) -> str:
     """Call the hosted model using the official REST API with the configured API key."""
     settings = get_settings()
     if not settings.gemini_api_key:
@@ -940,7 +1152,7 @@ async def _generate_model_answer(prompt: str) -> str:
         "generationConfig": {
             "temperature": 0.2,
             "topP": 0.8,
-            "maxOutputTokens": 220,
+            "maxOutputTokens": max(120, min(int(max_output_tokens), 1024)),
         },
     }
     headers = {
@@ -949,10 +1161,9 @@ async def _generate_model_answer(prompt: str) -> str:
     }
 
     timeout_seconds = max(float(settings.gemini_model_timeout_seconds), 1.0)
-    model_candidates = _generation_model_candidates(
-        settings.gemma_model_id,
-        settings.gemini_model_fallbacks,
-    )
+    primary_model = (preferred_model or "").strip() or settings.ai_default_model_id or settings.gemma_model_id
+    fallback_candidates = fallback_models if fallback_models is not None else settings.gemini_model_fallbacks
+    model_candidates = _generation_model_candidates(primary_model, fallback_candidates)
     max_retries = max(int(settings.gemini_generation_retries), 0)
     last_error: Exception | None = None
 
@@ -1133,6 +1344,264 @@ def _should_use_operator_answer_directly(query: str, operator_answer: Optional[s
     return _query_prefers_operator_answer(query)
 
 
+def _normalise_text(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
+
+
+def _product_match_score(query: str, product: dict[str, Any]) -> float:
+    query_norm = _normalise_text(query)
+    if not query_norm:
+        return 0.0
+
+    product_id = _normalise_text(str(product.get("product_id", "")))
+    product_name = _normalise_text(str(product.get("name", product.get("product_name", ""))))
+    category = _normalise_text(str(product.get("category", "")))
+
+    score = 0.0
+    if product_name and product_name in query_norm:
+        score += 1.0
+    if query_norm and product_name and query_norm in product_name:
+        score += 0.9
+    if product_id and product_id in query_norm:
+        score += 0.95
+
+    query_tokens = [token for token in query_norm.split(" ") if len(token) >= 3]
+    if query_tokens and product_name:
+        overlap = sum(1 for token in query_tokens if token in product_name)
+        score += min(overlap / max(len(query_tokens), 1), 0.8)
+    if query_tokens and category:
+        category_overlap = sum(1 for token in query_tokens if token in category)
+        score += min(category_overlap / max(len(query_tokens), 1), 0.3)
+    return score
+
+
+def _hybrid_product_matches(
+    query: str,
+    inventory: list[dict[str, Any]],
+    rag_products: list[dict[str, Any]],
+    *,
+    top_k: int = 4,
+) -> tuple[list[dict[str, Any]], float]:
+    if not inventory and not rag_products:
+        return [], 0.0
+
+    scored_by_id: dict[str, tuple[float, dict[str, Any]]] = {}
+    for product in inventory:
+        product_id = str(product.get("product_id", ""))
+        if not product_id:
+            continue
+        lexical_score = _product_match_score(query, product)
+        scored_by_id[product_id] = (lexical_score, product)
+
+    for rag in rag_products:
+        product_id = str(rag.get("product_id", ""))
+        if not product_id:
+            continue
+        distance = _safe_float(rag.get("distance"))
+        vector_score = max(0.0, min(1.0, 1.0 - distance))
+        if product_id in scored_by_id:
+            current_score, item = scored_by_id[product_id]
+            merged = max(current_score, 0.65 + vector_score)
+            scored_by_id[product_id] = (merged, item)
+            continue
+
+        # Keep vector-only candidates when inventory hydration missed them.
+        candidate = {
+            "product_id": product_id,
+            "name": rag.get("product_name"),
+            "category": rag.get("category"),
+        }
+        lexical_score = _product_match_score(query, candidate)
+        scored_by_id[product_id] = (max(lexical_score, 0.55 + vector_score), candidate)
+
+    ranked = sorted(scored_by_id.values(), key=lambda pair: pair[0], reverse=True)
+    matches = [item for _, item in ranked[:top_k]]
+    confidence = ranked[0][0] if ranked else 0.0
+    # Clamp to simple confidence range for client/UI metadata
+    confidence = max(0.0, min(confidence, 1.0))
+    return matches, confidence
+
+
+def _select_model(
+    *,
+    query: str,
+    intent: IntentName,
+    explicit_model_id: Optional[str],
+    retrieval_confidence: float,
+) -> tuple[str, list[str], int]:
+    settings = get_settings()
+    explicit = (explicit_model_id or "").strip()
+    if explicit:
+        fallback_models = [model for model in settings.ai_fallback_model_ids if model != explicit]
+        return explicit, fallback_models, 420 if _query_requests_deeper_reasoning(query) else 280
+
+    reasoning_needed = (
+        intent in {"reasoning"}
+        or _query_requests_deeper_reasoning(query)
+        or len(query.split()) >= 18
+        or (intent == "product_lookup" and retrieval_confidence < 0.45)
+    )
+    if reasoning_needed:
+        selected = settings.ai_reasoning_model_id or settings.ai_default_model_id or settings.gemma_model_id
+        fallback_models = [
+            model
+            for model in [
+                settings.ai_fast_model_id,
+                settings.ai_default_model_id,
+                *settings.ai_fallback_model_ids,
+                *settings.gemini_model_fallbacks,
+            ]
+            if model and model != selected
+        ]
+        return selected, list(dict.fromkeys(fallback_models)), 520
+
+    selected = settings.ai_fast_model_id or settings.ai_default_model_id or settings.gemma_model_id
+    fallback_models = [
+        model
+        for model in [
+            settings.ai_default_model_id,
+            settings.ai_reasoning_model_id,
+            *settings.ai_fallback_model_ids,
+            *settings.gemini_model_fallbacks,
+        ]
+        if model and model != selected
+    ]
+    return selected, list(dict.fromkeys(fallback_models)), 260
+
+
+def _build_product_fact_line(product: dict[str, Any]) -> str:
+    name = str(product.get("name") or product.get("product_name") or product.get("product_id") or "Unknown product")
+    qty = _safe_int(product.get("quantity_on_hand"))
+    reorder = _safe_int(product.get("reorder_threshold"))
+    expiry = str(product.get("expiry_status", "OK")).upper()
+    price = product.get("price")
+    bits = [f"{name}: qty={qty}", f"reorder={reorder}", f"expiry={expiry}"]
+    if price not in (None, ""):
+        bits.append(f"price={price}")
+    return ", ".join(bits)
+
+
+def _build_retrieval_only_answer(
+    *,
+    intent: IntentName,
+    query: str,
+    analytics_context: dict[str, Any],
+    alerts: list[dict[str, Any]],
+    matched_products: list[dict[str, Any]],
+    retrieval_confidence: float,
+) -> Optional[str]:
+    if intent == "sales_kpi":
+        return _build_top_selling_product_answer(query, analytics_context) or _build_sales_answer(query, analytics_context)
+
+    if intent in {"product_lookup", "reorder_decision"}:
+        if retrieval_confidence < 0.35 or not matched_products:
+            return "I cannot confidently match that product from current store data. Please use the exact product name or SKU."
+        lead = matched_products[0]
+        base = _build_product_fact_line(lead)
+        if intent == "reorder_decision":
+            qty = _safe_int(lead.get("quantity_on_hand"))
+            reorder = _safe_int(lead.get("reorder_threshold"))
+            if reorder > 0 and qty <= reorder:
+                return f"Restock priority is {base}. It is at or below reorder threshold, so replenishment should be immediate."
+            return f"{base}. Stock is above reorder threshold right now, so immediate restock is not urgent."
+        return f"Matched product details: {base}."
+
+    if intent == "inventory_risk":
+        return _build_inventory_status_answer(query, matched_products or [], alerts)
+
+    return None
+
+
+def _build_evidence_prompt(
+    *,
+    intent: IntentName,
+    query: str,
+    analytics_summary: str,
+    freshness_status: str,
+    alerts: list[dict[str, Any]],
+    matched_products: list[dict[str, Any]],
+    rag_products: list[dict[str, Any]],
+    customers: list[dict[str, Any]],
+    transactions: list[dict[str, Any]],
+) -> str:
+    compact_payload = {
+        "intent": intent,
+        "freshness_status": freshness_status,
+        "analytics_summary": analytics_summary,
+        "matched_products": [
+            {
+                "product_id": item.get("product_id"),
+                "name": item.get("name") or item.get("product_name"),
+                "category": item.get("category"),
+                "quantity_on_hand": item.get("quantity_on_hand"),
+                "reorder_threshold": item.get("reorder_threshold"),
+                "expiry_status": item.get("expiry_status"),
+                "price": item.get("price"),
+            }
+            for item in matched_products[:4]
+        ],
+        "rag_candidates": [
+            {
+                "product_id": item.get("product_id"),
+                "product_name": item.get("product_name"),
+                "category": item.get("category"),
+                "distance": item.get("distance"),
+            }
+            for item in rag_products[:5]
+        ],
+        "alerts": [
+            {
+                "alert_id": alert.get("alert_id"),
+                "title": alert.get("title"),
+                "severity": alert.get("severity"),
+                "source_entity_id": alert.get("source_entity_id"),
+            }
+            for alert in alerts[:6]
+        ],
+        "customers": [
+            {
+                "customer_id": customer.get("customer_id"),
+                "name": customer.get("name"),
+                "total_spend": customer.get("total_spend", customer.get("lifetime_spend")),
+                "visit_count": customer.get("visit_count"),
+            }
+            for customer in customers[:4]
+        ],
+        "transactions": [
+            {
+                "transaction_id": txn.get("transaction_id"),
+                "total_amount": txn.get("total_amount"),
+                "sale_timestamp": txn.get("sale_timestamp"),
+                "items": txn.get("items", [])[:4],
+            }
+            for txn in transactions[:4]
+        ],
+    }
+    return (
+        f"{_SYSTEM_INSTRUCTION}\n\n"
+        "Use only the evidence JSON below. If evidence is weak or missing, say you cannot confirm.\n"
+        f"=== EVIDENCE JSON ===\n{json.dumps(compact_payload, sort_keys=True, default=_json_safe_default)}\n\n"
+        f"=== USER QUESTION ===\n{query}"
+    )
+
+
+def _finalize_grounded_answer(
+    *,
+    answer: str,
+    intent: IntentName,
+    retrieval_confidence: float,
+    matched_products: list[dict[str, Any]],
+) -> str:
+    cleaned = _response_guard(answer, freshness_status="fresh")
+    if intent in {"product_lookup", "reorder_decision"} and retrieval_confidence < 0.35:
+        return "I cannot confidently match that product from current store data. Please use the exact product name or SKU."
+    if intent in {"product_lookup", "reorder_decision"} and matched_products:
+        lead_name = str(matched_products[0].get("name") or matched_products[0].get("product_name") or "").strip()
+        if lead_name and lead_name.lower() not in cleaned.lower():
+            return f"{lead_name}: {cleaned}"
+    return cleaned
+
+
 # ---------------------------------------------------------------------------
 # Public service methods
 # ---------------------------------------------------------------------------
@@ -1146,6 +1615,7 @@ class AIService:
         user_id: str,
         chat_session_id: str,
         query: str,
+        model_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Handle a single AI chat turn.
@@ -1163,8 +1633,11 @@ class AIService:
             AIContextNotReadyError: If analytics metadata is unavailable.
             AIProviderError:        If the hosted model call fails.
         """
-        # Step 1: Freshness metadata
-        degraded_context = False
+        intent = _detect_intent(query)
+        needs_product_focus = _intent_needs_product_focus(intent)
+        needs_customers = _intent_needs_customers(intent, query)
+        needs_transactions = _intent_needs_transactions(intent, query)
+
         try:
             metadata = await _await_with_timeout(
                 repository.get_analytics_metadata(store_id),
@@ -1177,7 +1650,6 @@ class AIService:
                 extra={"store_id": store_id},
             )
             metadata = None
-            degraded_context = True
         if metadata is None:
             metadata = {
                 "analytics_last_updated_at": datetime.now(timezone.utc).isoformat(),
@@ -1186,28 +1658,35 @@ class AIService:
 
         last_updated, freshness_status = _resolve_freshness_fields(metadata)
 
-        # Step 2: Fetch independent context data in parallel
         alerts_task = asyncio.create_task(
             _await_with_timeout(
-                repository.get_relevant_alerts_snapshot(store_id),
+                repository.get_relevant_alerts_snapshot(store_id, limit=10),
                 _CONTEXT_TIMEOUT_SECONDS,
             )
         )
-        customers_task = asyncio.create_task(
+        inventory_task = asyncio.create_task(
             _await_with_timeout(
-                repository.get_customer_snapshot(
+                repository.get_inventory_snapshot(
                     store_id,
+                    limit=24 if needs_product_focus else 10,
                     query_text=query,
                 ),
                 _CONTEXT_TIMEOUT_SECONDS,
             )
         )
-        query_embedding_task = asyncio.create_task(
-            _await_with_timeout(
-                _embed_query(query),
-                _CONTEXT_TIMEOUT_SECONDS,
+        customers_task: Optional[asyncio.Task] = None
+        if needs_customers:
+            customers_task = asyncio.create_task(
+                _await_with_timeout(
+                    repository.get_customer_snapshot(store_id, limit=10, query_text=query),
+                    _CONTEXT_TIMEOUT_SECONDS,
+                )
             )
-        )
+        query_embedding_task: Optional[asyncio.Task] = None
+        if needs_product_focus:
+            query_embedding_task = asyncio.create_task(
+                _await_with_timeout(_embed_query(query), _CONTEXT_TIMEOUT_SECONDS)
+            )
 
         try:
             alerts = await alerts_task
@@ -1218,17 +1697,9 @@ class AIService:
                 extra={"store_id": store_id},
             )
             alerts = []
-            degraded_context = True
-        related_product_ids = _get_related_product_ids(alerts)
+
         try:
-            inventory = await _await_with_timeout(
-                repository.get_inventory_snapshot(
-                    store_id,
-                    product_ids=related_product_ids,
-                    query_text=query,
-                ),
-                _CONTEXT_TIMEOUT_SECONDS,
-            )
+            inventory = await inventory_task
         except Exception as exc:
             logger.warning(
                 "Inventory snapshot read failed; continuing without inventory context",
@@ -1236,80 +1707,107 @@ class AIService:
                 extra={"store_id": store_id},
             )
             inventory = []
-            degraded_context = True
-        try:
-            customers = await customers_task
-        except Exception as exc:
-            logger.warning(
-                "Customer snapshot read failed; continuing without customer context",
-                exc_info=exc,
-                extra={"store_id": store_id},
-            )
-            customers = []
-            degraded_context = True
-        try:
-            transactions = await _await_with_timeout(
-                repository.get_recent_transactions_snapshot(
-                    store_id,
-                    query_text=query,
-                    customer_ids=[item.get("customer_id") for item in customers if item.get("customer_id")],
-                    product_ids=[item.get("product_id") for item in inventory if item.get("product_id")],
-                ),
-                _CONTEXT_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Transaction snapshot read failed; continuing without transaction context",
-                exc_info=exc,
-                extra={"store_id": store_id},
-            )
-            transactions = []
-            degraded_context = True
 
-        # Step 2b: RAG — vector retrieval (non-blocking; degrades gracefully)
+        customers: list[dict[str, Any]] = []
+        if customers_task is not None:
+            try:
+                customers = await customers_task
+            except Exception as exc:
+                logger.warning(
+                    "Customer snapshot read failed; continuing without customer context",
+                    exc_info=exc,
+                    extra={"store_id": store_id},
+                )
+                customers = []
+
         rag_products: list[dict[str, Any]] = []
-        try:
-            _query_embedding = await query_embedding_task
-            if _query_embedding:
-                _rag_top_k = get_settings().vector_search_top_k
-                rag_products = await _await_with_timeout(
-                    repository.vector_search_products(
+        if query_embedding_task is not None:
+            try:
+                _query_embedding = await query_embedding_task
+                if _query_embedding:
+                    rag_products = await _await_with_timeout(
+                        repository.vector_search_products(
+                            store_id,
+                            query_embedding=_query_embedding,
+                            top_k=max(get_settings().vector_search_top_k, 6),
+                        ),
+                        _CONTEXT_TIMEOUT_SECONDS,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "RAG vector retrieval failed; continuing without vector context",
+                    exc_info=exc,
+                    extra={"store_id": store_id},
+                )
+                rag_products = []
+
+        vector_only_ids = [
+            str(item.get("product_id", ""))
+            for item in rag_products
+            if item.get("product_id")
+            and str(item.get("product_id")) not in {str(p.get("product_id", "")) for p in inventory}
+        ][:6]
+        if vector_only_ids:
+            try:
+                hydrated = await _await_with_timeout(
+                    repository.get_products_by_ids(store_id, vector_only_ids),
+                    _CONTEXT_TIMEOUT_SECONDS,
+                )
+                inventory.extend(hydrated)
+            except Exception as exc:
+                logger.warning(
+                    "Could not hydrate vector-only products from Firestore",
+                    exc_info=exc,
+                    extra={"store_id": store_id},
+                )
+
+        matched_products, retrieval_confidence = _hybrid_product_matches(query, inventory, rag_products, top_k=4)
+        matched_product_ids = [str(item.get("product_id", "")) for item in matched_products if item.get("product_id")]
+        related_product_ids = _get_related_product_ids(alerts)
+        analytics_product_ids = list(dict.fromkeys([*matched_product_ids, *related_product_ids]))[:8]
+
+        transactions: list[dict[str, Any]] = []
+        if needs_transactions or (needs_product_focus and bool(matched_product_ids)):
+            try:
+                transactions = await _await_with_timeout(
+                    repository.get_recent_transactions_snapshot(
                         store_id,
-                        query_embedding=_query_embedding,
-                        top_k=_rag_top_k,
+                        limit=8,
+                        query_text=query,
+                        customer_ids=[item.get("customer_id") for item in customers if item.get("customer_id")],
+                        product_ids=matched_product_ids or [item.get("product_id") for item in inventory if item.get("product_id")],
                     ),
                     _CONTEXT_TIMEOUT_SECONDS,
                 )
-        except Exception as exc:
-            logger.warning(
-                "RAG vector retrieval failed; continuing without vector context",
-                exc_info=exc,
-                extra={"store_id": store_id},
-            )
-            rag_products = []
-            degraded_context = True
+            except Exception as exc:
+                logger.warning(
+                    "Transaction snapshot read failed; continuing without transaction context",
+                    exc_info=exc,
+                    extra={"store_id": store_id},
+                )
+                transactions = []
 
         try:
             analytics_context = await _await_with_timeout(
                 repository.get_analytics_context(
                     store_id,
-                    include_customer_insights=_query_mentions_customers(query),
-                    product_ids=[item.get("product_id") for item in inventory if item.get("product_id")],
+                    include_customer_insights=needs_customers,
+                    product_ids=analytics_product_ids or None,
                 ),
                 _CONTEXT_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             logger.warning("Analytics context query failed; falling back to live operational summary", exc_info=exc)
             live_repo = AnalyticsRepository()
-            live_summary, live_summary_is_fallback = await _get_live_dashboard_summary_fallback(live_repo, store_id)
+            live_summary, _ = await _get_live_dashboard_summary_fallback(live_repo, store_id)
             analytics_context = {
                 "dashboard_summary": live_summary,
                 "sales_trends": [],
                 "product_performance": [],
                 "customer_insights": [],
             }
-            degraded_context = degraded_context or live_summary_is_fallback
-        if _query_mentions_customers(query) and not (analytics_context.get("customer_insights") or []):
+
+        if needs_customers and not (analytics_context.get("customer_insights") or []):
             analytics_context["customer_insights"] = [
                 {
                     "customer_id": customer.get("customer_id"),
@@ -1320,6 +1818,7 @@ class AIService:
                 }
                 for customer in customers[:5]
             ]
+
         analytics_summary = _build_analytics_summary(
             {
                 **metadata,
@@ -1330,7 +1829,7 @@ class AIService:
         )
         if not analytics_summary:
             live_repo = AnalyticsRepository()
-            live_summary, live_summary_is_fallback = await _get_live_dashboard_summary_fallback(live_repo, store_id)
+            live_summary, _ = await _get_live_dashboard_summary_fallback(live_repo, store_id)
             analytics_summary = "; ".join(
                 [
                     f"analytics_last_updated_at={last_updated}",
@@ -1342,33 +1841,49 @@ class AIService:
                     f"top_selling_product={live_summary.get('top_selling_product', 'unknown')}",
                 ]
             )
-            degraded_context = degraded_context or live_summary_is_fallback
 
-        # Step 3: Build prompt
-        context_block = _build_context_block(
-            analytics_summary, alerts, inventory, customers, transactions,
-            rag_products=rag_products,
+        direct_answer = _build_retrieval_only_answer(
+            intent=intent,
+            query=query,
+            analytics_context=analytics_context,
+            alerts=alerts,
+            matched_products=matched_products if matched_products else inventory,
+            retrieval_confidence=retrieval_confidence,
         )
-        full_prompt = (
-            f"{_SYSTEM_INSTRUCTION}\n\n"
-            f"=== STRUCTURED CONTEXT JSON ===\n{context_block}\n\n"
-            f"=== USER QUESTION ===\n{query}"
+        answer_mode = "model"
+        selected_model_id, fallback_models, max_output_tokens = _select_model(
+            query=query,
+            intent=intent,
+            explicit_model_id=model_id,
+            retrieval_confidence=retrieval_confidence,
         )
+        used_fallback = False
 
-        # Step 4: Call hosted model
-        operator_answer, operator_analytics_used = _build_operator_answer_result(
-            query,
-            analytics_context,
-            alerts,
-            inventory,
-            customers,
-            transactions,
-        )
-        if _should_use_operator_answer_directly(query, operator_answer):
-            raw_answer = operator_answer or ""
+        if direct_answer and intent in {"sales_kpi", "inventory_risk"} and not _query_requests_deeper_reasoning(query):
+            raw_answer = direct_answer
+            answer_mode = "retrieval_only"
+        elif direct_answer and intent in {"product_lookup", "reorder_decision"} and retrieval_confidence >= 0.72:
+            raw_answer = direct_answer
+            answer_mode = "retrieval_only"
         else:
+            prompt = _build_evidence_prompt(
+                intent=intent,
+                query=query,
+                analytics_summary=analytics_summary,
+                freshness_status=freshness_status,
+                alerts=alerts,
+                matched_products=matched_products,
+                rag_products=rag_products,
+                customers=customers,
+                transactions=transactions,
+            )
             try:
-                raw_answer = await _generate_model_answer(full_prompt)
+                raw_answer = await _generate_model_answer(
+                    prompt,
+                    preferred_model=selected_model_id,
+                    fallback_models=fallback_models,
+                    max_output_tokens=max_output_tokens,
+                )
             except Exception as exc:
                 logger.error("Hosted model API call failed; using deterministic fallback answer", exc_info=exc)
                 raw_answer = _build_fallback_answer(
@@ -1381,15 +1896,22 @@ class AIService:
                     transactions=transactions,
                     freshness_status=freshness_status,
                 )
+                answer_mode = "fallback"
+                used_fallback = True
 
-        # Step 5: Guard response
-        answer = _response_guard(raw_answer, freshness_status)
-        if operator_answer and (_query_prefers_operator_answer(query) or _looks_like_refusal(answer) or degraded_context):
-            answer = operator_answer
+        answer = _finalize_grounded_answer(
+            answer=raw_answer,
+            intent=intent,
+            retrieval_confidence=retrieval_confidence,
+            matched_products=matched_products,
+        )
+        if not answer:
+            answer = "I cannot confirm that from current store data."
+
         grounding = _extract_grounding(
             alerts,
-            inventory,
-            analytics_used=_infer_analytics_used(query, answer, operator_analytics_used),
+            matched_products or inventory,
+            analytics_used=_infer_analytics_used(query, answer, intent in {"sales_kpi", "customer_insight", "reasoning"}),
             rag_products=rag_products,
         )
 
@@ -1451,6 +1973,19 @@ class AIService:
             "freshness_status": freshness_status,
             "answer": answer,
             "grounding": grounding,
+            "intent": intent,
+            "answer_mode": answer_mode,
+            "model_id": selected_model_id,
+            "retrieval_confidence": round(retrieval_confidence, 3),
+            "used_fallback": used_fallback,
+            "citations": [
+                {
+                    "type": "product",
+                    "id": item.get("product_id"),
+                    "name": item.get("name") or item.get("product_name"),
+                }
+                for item in matched_products[:3]
+            ],
         }
 
     async def get_session_history(

@@ -40,6 +40,13 @@ class Settings:
     # Gemini
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemma_model_id: str = os.getenv("GEMMA_MODEL_ID", "gemini-2.0-flash")
+    ai_default_model_id: str = os.getenv("AI_DEFAULT_MODEL_ID", os.getenv("GEMMA_MODEL_ID", "gemini-2.0-flash"))
+    ai_fast_model_id: str = os.getenv("AI_FAST_MODEL_ID", "gemini-2.0-flash")
+    ai_reasoning_model_id: str = os.getenv("AI_REASONING_MODEL_ID", "gemma-4-26b-a4b-it")
+    ai_fallback_model_ids_raw: str = os.getenv(
+        "AI_FALLBACK_MODEL_IDS",
+        os.getenv("GEMINI_MODEL_FALLBACKS", "gemini-2.0-flash-lite-001"),
+    )
     gemini_model_fallbacks_raw: str = os.getenv(
         "GEMINI_MODEL_FALLBACKS",
         "gemini-2.0-flash-lite-001",
@@ -72,6 +79,14 @@ class Settings:
         return [
             model.strip()
             for model in self.gemini_model_fallbacks_raw.split(",")
+            if model.strip()
+        ]
+
+    @property
+    def ai_fallback_model_ids(self) -> list[str]:
+        return [
+            model.strip()
+            for model in self.ai_fallback_model_ids_raw.split(",")
             if model.strip()
         ]
 

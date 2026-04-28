@@ -29,6 +29,12 @@ pnpm-debug.log*
 # Cloud Run local deploy configs
 infra/cloudrun/*.env.yaml
 
+# Local deployment helpers (keep local, do not push)
+scripts/deploy*.sh
+
+# Internal feature-planning docs (large/noisy for public repo)
+docs/feature/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -43,3 +49,5 @@ auth-id-keys.txt
 backend/set_firebase_claims.local.py
 firebase-admin.json
 
+# Temporary evaluation login-note component (safe to delete after judging)
+frontend/components/evaluator-demo-login-note.tsx

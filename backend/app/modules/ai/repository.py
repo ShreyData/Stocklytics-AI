@@ -188,6 +188,33 @@ async def get_inventory_snapshot(
     return ordered[:limit]
 
 
+async def get_products_by_ids(
+    store_id: str,
+    product_ids: list[str],
+) -> list[dict[str, Any]]:
+    """
+    Fetch specific products by ID for the given store.
+
+    Used by AI retrieval to hydrate vector matches with full inventory facts.
+    Returns only products that belong to the provided store scope.
+    """
+    if not product_ids:
+        return []
+
+    db = _get_db()
+    results: list[dict[str, Any]] = []
+    for product_id in list(dict.fromkeys(product_ids))[:20]:
+        doc: DocumentSnapshot = await db.collection(PRODUCTS_COLLECTION).document(product_id).get()
+        if not doc.exists:
+            continue
+        data: dict[str, Any] = doc.to_dict() or {}
+        if str(data.get("store_id", "")) != store_id:
+            continue
+        data.setdefault("product_id", doc.id)
+        results.append(data)
+    return _normalise_timestamps_on_list(results)
+
+
 async def get_customer_snapshot(
     store_id: str,
     limit: int = 10,

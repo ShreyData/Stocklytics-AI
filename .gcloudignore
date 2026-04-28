@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# Cloud Build upload filters
+# Keep this explicit: do NOT inherit .gitignore here.
+# ---------------------------------------------------------------------------
+
+# VCS / local tooling
+.git
+.gitignore
+.gcloudignore
+.codex/
+
+# Python cache / virtual env
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Node / Next build artifacts
+node_modules/
+.next/
+dist/
+build/
+coverage/
+*.log
+
+# Local secrets and machine-specific files
+auth-id-keys.txt
+firebase-admin.json
+backend/set_firebase_claims.local.py
+infra/cloudrun/*.env.yaml
+
+# Local env files (keep example templates)
+.env
+.env.*
+!.env.example
+!backend/.env.example
+!frontend/.env.example
