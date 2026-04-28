@@ -191,7 +191,7 @@ export default function Billing() {
                   >
                     <CardContent className="p-4 flex flex-col items-center justify-center text-center h-full">
                       <div className="font-medium">{product.name}</div>
-                      <div className="text-muted-foreground">${product.price.toFixed(2)}</div>
+                      <div className="text-muted-foreground">₹{product.price.toFixed(2)}</div>
                       <div className="text-xs mt-2 text-muted-foreground">
                         Stock: {product.quantity_on_hand}
                       </div>
@@ -220,7 +220,7 @@ export default function Billing() {
                         <div className="flex-1">
                           <div className="font-medium">{item.name}</div>
                           <div className="text-sm text-muted-foreground">
-                            ${item.price.toFixed(2)} x {item.cartQuantity}
+                            ₹{item.price.toFixed(2)} x {item.cartQuantity}
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -255,7 +255,7 @@ export default function Billing() {
                     <div className="border-t pt-4 mt-4">
                       <div className="flex items-center justify-between font-bold text-lg">
                         <span>Total</span>
-                        <span>${totalAmount.toFixed(2)}</span>
+                        <span>₹{totalAmount.toFixed(2)}</span>
                       </div>
                       <p className="text-xs text-muted-foreground mt-2">
                         Retry safety key: {idempotencyKey}

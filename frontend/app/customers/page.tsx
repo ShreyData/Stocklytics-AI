@@ -160,7 +160,7 @@ export default function Customers() {
                       >
                         <TableCell className="font-medium">{customer.name}</TableCell>
                         <TableCell>{customer.phone}</TableCell>
-                        <TableCell>${customer.total_spend.toFixed(2)}</TableCell>
+                        <TableCell>₹{customer.total_spend.toFixed(2)}</TableCell>
                         <TableCell>{customer.visit_count}</TableCell>
                         <TableCell>
                           {customer.last_purchase_at
@@ -199,7 +199,7 @@ export default function Customers() {
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <p className="text-xs uppercase tracking-widest text-muted-foreground">Total Spend</p>
-                        <p className="font-semibold">${selectedCustomer.total_spend.toFixed(2)}</p>
+                        <p className="font-semibold">₹{selectedCustomer.total_spend.toFixed(2)}</p>
                       </div>
                       <div>
                         <p className="text-xs uppercase tracking-widest text-muted-foreground">Visits</p>
@@ -228,7 +228,7 @@ export default function Customers() {
                           >
                             <div className="flex items-center justify-between gap-4">
                               <span className="font-medium">{transaction.transaction_id}</span>
-                              <span className="font-semibold">${transaction.total_amount.toFixed(2)}</span>
+                              <span className="font-semibold">₹{transaction.total_amount.toFixed(2)}</span>
                             </div>
                             <p className="mt-1 text-sm text-muted-foreground">
                               {format(new Date(transaction.sale_timestamp), 'PPp')}

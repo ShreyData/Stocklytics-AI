@@ -93,7 +93,7 @@ export default function Analytics() {
                 <CardTitle className="text-sm font-medium">Today&apos;s Sales</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">${summary.today_sales.toLocaleString()}</div>
+                <div className="text-2xl font-bold">₹{summary.today_sales.toLocaleString()}</div>
               </CardContent>
             </Card>
             <Card>
@@ -153,7 +153,7 @@ export default function Analytics() {
                         salesPoints.map((point) => (
                           <TableRow key={point.label}>
                             <TableCell>{point.label}</TableCell>
-                            <TableCell>${point.sales_amount.toLocaleString()}</TableCell>
+                            <TableCell>₹{point.sales_amount.toLocaleString()}</TableCell>
                             <TableCell>{point.transactions}</TableCell>
                           </TableRow>
                         ))
@@ -193,7 +193,7 @@ export default function Analytics() {
                           <TableRow key={item.product_id}>
                             <TableCell>{item.product_name}</TableCell>
                             <TableCell>{item.quantity_sold}</TableCell>
-                            <TableCell>${item.revenue.toLocaleString()}</TableCell>
+                            <TableCell>₹{item.revenue.toLocaleString()}</TableCell>
                           </TableRow>
                         ))
                       )}
@@ -231,7 +231,7 @@ export default function Analytics() {
                         topCustomers.map((customer) => (
                           <TableRow key={customer.customer_id}>
                             <TableCell>{customer.name}</TableCell>
-                            <TableCell>${customer.lifetime_spend.toLocaleString()}</TableCell>
+                            <TableCell>₹{customer.lifetime_spend.toLocaleString()}</TableCell>
                             <TableCell>{customer.visit_count}</TableCell>
                           </TableRow>
                         ))

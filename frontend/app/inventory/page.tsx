@@ -410,7 +410,7 @@ export default function Inventory() {
                     >
                       <TableCell className="font-medium">{product.name}</TableCell>
                       <TableCell className="text-muted-foreground">{product.category}</TableCell>
-                      <TableCell>${product.price.toFixed(2)}</TableCell>
+                      <TableCell>₹{product.price.toFixed(2)}</TableCell>
                       <TableCell>
                         <span className={cn(isLowStock && 'text-red-500 font-bold')}>
                           {product.quantity_on_hand}
