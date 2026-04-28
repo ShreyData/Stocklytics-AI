@@ -117,6 +117,17 @@ async def require_auth(
     _init_firebase()
     settings = get_settings()
 
+    if settings.demo_auth_bypass_enabled:
+        logger.warning(
+            "Demo auth bypass is enabled. Returning a shared demo user for all requests."
+        )
+        return AuthenticatedUser(
+            user_id="demo_user_public",
+            role="admin",
+            store_id="Demo_Shop",
+            email="demo@stocklytics.local",
+        )
+
     if credentials is None:
         raise UnauthorizedError("Missing Authorization header with Bearer token.")
 

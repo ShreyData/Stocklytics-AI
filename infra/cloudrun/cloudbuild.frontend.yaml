@@ -5,13 +5,15 @@ steps:
       - -f
       - frontend/Dockerfile
       - -t
-      - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-frontend:${SHORT_SHA}
+      - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-frontend:${_IMAGE_TAG}
       - --build-arg
       - BACKEND_URL=${_BACKEND_URL}
       - --build-arg
       - NEXT_PUBLIC_API_BASE_URL=${_NEXT_PUBLIC_API_BASE_URL}
       - --build-arg
       - NEXT_PUBLIC_USE_MOCKS=false
+      - --build-arg
+      - NEXT_PUBLIC_AUTO_LOGIN_DEMO=false
       - --build-arg
       - NEXT_PUBLIC_FIREBASE_API_KEY=${_NEXT_PUBLIC_FIREBASE_API_KEY}
       - --build-arg
@@ -26,8 +28,8 @@ steps:
       - NEXT_PUBLIC_FIREBASE_APP_ID=${_NEXT_PUBLIC_FIREBASE_APP_ID}
       - --build-arg
       - APP_URL=${_APP_URL}
-      - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-frontend:${SHORT_SHA}
+      - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-frontend:${_IMAGE_TAG}
       - frontend
 
 images:
-  - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-frontend:${SHORT_SHA}
+  - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-frontend:${_IMAGE_TAG}

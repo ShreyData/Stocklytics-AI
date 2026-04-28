@@ -51,6 +51,7 @@ class Settings:
     gemini_embedding_model: str = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
     vector_search_top_k: int = int(os.getenv("VECTOR_SEARCH_TOP_K", "5"))
     embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "50"))
+    demo_auth_bypass_enabled: bool = os.getenv("DEMO_AUTH_BYPASS_ENABLED", "false").lower() == "true"
 
     @property
     def is_local(self) -> bool:

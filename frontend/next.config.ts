@@ -1,5 +1,11 @@
 import type {NextConfig} from 'next';
 
+const backendUrl = process.env.BACKEND_URL;
+
+if (!backendUrl) {
+  throw new Error('Missing required env var: BACKEND_URL');
+}
+
 const nextConfig: NextConfig = {
   devIndicators: false,
   reactStrictMode: true,
@@ -22,7 +28,6 @@ const nextConfig: NextConfig = {
   },
   output: 'standalone',
   async rewrites() {
-    const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
     return [
       {
         source: '/api/v1/:path*',

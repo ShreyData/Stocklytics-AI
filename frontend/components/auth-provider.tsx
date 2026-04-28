@@ -6,7 +6,7 @@ import { apiService } from '@/lib/api-service';
 import { AuthMode, UserProfile } from '@/lib/types';
 import { AUTH_TOKEN_KEY } from '@/lib/auth-storage';
 import { getFirebaseAuth } from '@/lib/firebase';
-import { getAuthMode, getFrontendRuntimeMode } from '@/lib/runtime';
+import { autoLoginDemo, getAuthMode, getFrontendRuntimeMode } from '@/lib/runtime';
 
 interface AuthContextType {
   user: UserProfile | null;
@@ -38,9 +38,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async function applyMockSession() {
       const runtimeMode = getFrontendRuntimeMode();
       let token = typeof window !== 'undefined' ? localStorage.getItem(AUTH_TOKEN_KEY) : null;
-      if (!token && runtimeMode === 'backend_stub_auth' && typeof window !== 'undefined') {
-        localStorage.setItem(AUTH_TOKEN_KEY, 'dev-token');
-        token = 'dev-token';
+      if (!token && typeof window !== 'undefined') {
+        if (runtimeMode === 'backend_stub_auth') {
+          localStorage.setItem(AUTH_TOKEN_KEY, 'dev-token');
+          token = 'dev-token';
+        } else if (runtimeMode === 'mock_api' && autoLoginDemo) {
+          localStorage.setItem(AUTH_TOKEN_KEY, 'mock-demo-token');
+          token = 'mock-demo-token';
+        }
       }
       if (!token) {
         setUser(null);

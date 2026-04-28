@@ -2,7 +2,11 @@ import axios from 'axios';
 import { AUTH_TOKEN_KEY } from './auth-storage';
 import { getFirebaseAuth } from './firebase';
 
-const baseURL = process.env.NEXT_PUBLIC_API_BASE_URL || '/api/v1';
+const baseURL = process.env.NEXT_PUBLIC_API_BASE_URL;
+
+if (!baseURL) {
+  throw new Error('Missing required env var: NEXT_PUBLIC_API_BASE_URL');
+}
 
 export const apiClient = axios.create({
   baseURL,

@@ -5,8 +5,8 @@ steps:
       - -f
       - backend/Dockerfile
       - -t
-      - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-backend:${SHORT_SHA}
+      - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-backend:${_IMAGE_TAG}
       - backend
 
 images:
-  - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-backend:${SHORT_SHA}
+  - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-backend:${_IMAGE_TAG}
