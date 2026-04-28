@@ -2,7 +2,19 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { AlertTriangle, BarChart3, Bot, Package, Send, User } from 'lucide-react';
+import {
+  AlertTriangle,
+  BarChart3,
+  Bot,
+  CheckCircle2,
+  Package,
+  RefreshCw,
+  Search,
+  Send,
+  Sparkles,
+  User,
+  XCircle,
+} from 'lucide-react';
 import { AppLayout } from '@/components/app-layout';
 import { FreshnessBadge } from '@/components/freshness-badge';
 import { Button } from '@/components/ui/button';
@@ -23,12 +35,12 @@ interface Message {
     analytics_used?: boolean;
     alerts_used?: string[];
     inventory_products_used?: string[];
+    rag_products_used?: string[];
   };
-  freshness?: {
-    lastUpdatedAt: string;
-    status: FreshnessStatus;
-  };
+  freshness?: { lastUpdatedAt: string; status: FreshnessStatus };
 }
+
+type SyncState = 'idle' | 'syncing' | 'success' | 'error';
 
 const LEGACY_FRESHNESS_PATTERNS = [
   /\s*(?:⚠️\s*)?Note:\s*Analytics data may be slightly behind real-time activity\s*\(freshness status:\s*delayed\)\.?/gi,
@@ -38,226 +50,143 @@ const LEGACY_FRESHNESS_PATTERNS = [
   /\s*Freshness status:\s*(?:delayed|stale)\.?/gi,
 ];
 
-function makeSessionId() {
-  return `chat_${uuidv4()}`;
-}
+function makeSessionId() { return `chat_${uuidv4()}`; }
 
-function readSavedSessions() {
-  if (typeof window === 'undefined') {
-    return [] as string[];
-  }
+function readSavedSessions(): string[] {
+  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(AI_CHAT_SESSIONS_KEY);
-    if (!raw) {
-      return [];
-    }
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
-  } catch {
-    return [];
-  }
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch { return []; }
 }
 
-function persistSessions(sessionIds: string[]) {
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(AI_CHAT_SESSIONS_KEY, JSON.stringify(sessionIds));
-  }
+function persistSessions(ids: string[]) {
+  if (typeof window !== 'undefined') localStorage.setItem(AI_CHAT_SESSIONS_KEY, JSON.stringify(ids));
 }
 
 function isMissingChatSessionError(error: unknown) {
-  const normalized = normalizeApiError(error);
-  return (
-    normalized.code === 'CHAT_SESSION_NOT_FOUND' ||
-    normalized.code === 'NOT_FOUND' ||
-    normalized.status === 404
-  );
+  const n = normalizeApiError(error);
+  return n.code === 'CHAT_SESSION_NOT_FOUND' || n.code === 'NOT_FOUND' || n.status === 404;
 }
 
-function isLowStock(product: Product) {
-  return product.status === 'ACTIVE' && product.quantity_on_hand <= product.reorder_threshold;
-}
+function isLowStock(p: Product) { return p.status === 'ACTIVE' && p.quantity_on_hand <= p.reorder_threshold; }
 
 function formatCurrency(amount: number) {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: 0,
-  }).format(amount);
+  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(amount);
 }
 
-function includesAny(text: string, terms: string[]) {
-  return terms.some((term) => text.includes(term));
-}
+function includesAny(text: string, terms: string[]) { return terms.some((t) => text.includes(t)); }
 
 function fallbackUsesAnalytics(query: string) {
-  const lowered = query.toLowerCase();
-  return includesAny(lowered, [
-    'sale',
-    'sales',
-    'revenue',
-    'transaction',
-    'transactions',
-    'customer',
-    'customers',
-    'buyer',
-    'buyers',
-  ]);
+  return includesAny(query.toLowerCase(), ['sale', 'sales', 'revenue', 'transaction', 'transactions', 'customer', 'customers', 'buyer', 'buyers']);
 }
 
 function normalizeAssistantText(text: string) {
   return LEGACY_FRESHNESS_PATTERNS
-    .reduce((cleaned, pattern) => cleaned.replace(pattern, ''), text)
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/[ \t]{2,}/g, ' ')
-    .trim();
+    .reduce((s, p) => s.replace(p, ''), text)
+    .replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
 }
 
-function buildFallbackAnswer(
-  query: string,
-  summary: DashboardSummary | null,
-  products: Product[],
-  alerts: Alert[],
-  customers: Customer[]
-) {
-  const lowStockProducts = products.filter(isLowStock).slice(0, 5);
-  const activeAlerts = alerts.filter((alert) => alert.status === 'ACTIVE');
-  const topCustomers = [...customers]
-    .sort((left, right) => {
-      if (right.total_spend !== left.total_spend) {
-        return right.total_spend - left.total_spend;
-      }
-      return right.visit_count - left.visit_count;
-    })
-    .slice(0, 3);
+function buildFallbackAnswer(query: string, summary: DashboardSummary | null, products: Product[], alerts: Alert[], customers: Customer[]) {
+  const lowStock = products.filter(isLowStock).slice(0, 5);
+  const active = alerts.filter((a) => a.status === 'ACTIVE');
+  const top = [...customers].sort((a, b) => b.total_spend - a.total_spend).slice(0, 3);
   const lines: string[] = [];
-  const lowered = query.toLowerCase();
-  const asksAboutSales = includesAny(lowered, ['sale', 'sales', 'revenue', 'today', 'transaction']);
-  const asksAboutStock = includesAny(lowered, ['stock', 'inventory', 'product', 'products']);
-  const asksAboutAlerts = includesAny(lowered, ['alert', 'alerts', 'risk', 'issue']);
-  const asksAboutCustomers = includesAny(lowered, ['customer', 'customers', 'buyer', 'buyers', 'loyal', 'repeat']);
-
-  if (asksAboutSales) {
-    if (summary) {
-      lines.push(
-        `Today's sales are ${formatCurrency(summary.today_sales)} across ${summary.today_transactions} transactions.`
-      );
+  const q = query.toLowerCase();
+  if (includesAny(q, ['sale', 'revenue', 'today', 'transaction'])) {
+    lines.push(summary ? `Today's sales are ${formatCurrency(summary.today_sales)} across ${summary.today_transactions} transactions.` : "I couldn't confirm today's sales from the available snapshot.");
+    if (summary?.top_selling_product) lines.push(`${summary.top_selling_product} is the current top seller.`);
+  }
+  if (includesAny(q, ['stock', 'inventory', 'product'])) {
+    if (lowStock.length > 0) {
+      lines.push(`${lowStock.length} low stock products need attention. Most urgent: ${lowStock[0].name} (${lowStock[0].quantity_on_hand} left, threshold ${lowStock[0].reorder_threshold}).`);
     } else {
-      lines.push("I couldn't confirm today's sales from the currently available analytics snapshot.");
-    }
-    if (summary?.top_selling_product) {
-      lines.push(`${summary.top_selling_product} is the current top-selling product.`);
-    }
-    if (summary?.low_stock_count) {
-      lines.push(`${summary.low_stock_count} products are already at or below their reorder threshold.`);
+      lines.push('No active low stock products found in current inventory data.');
     }
   }
-
-  if (asksAboutStock) {
-    if (lowStockProducts.length > 0) {
-      const mostUrgent = lowStockProducts[0];
-      lines.push(
-        `${lowStockProducts.length} low stock products need attention. Most urgent: ${mostUrgent.name} with ${mostUrgent.quantity_on_hand} units left versus a threshold of ${mostUrgent.reorder_threshold}.`
-      );
-      lines.push(
-        `Priority list: ${lowStockProducts
-          .map((product) => `${product.name} (${product.quantity_on_hand} left, threshold ${product.reorder_threshold})`)
-          .join(', ')}.`
-      );
-    } else {
-      lines.push('I could not confirm any active low stock products from the current inventory data.');
-    }
+  if (includesAny(q, ['alert', 'risk', 'issue'])) lines.push(`There are ${active.length} active alerts right now.`);
+  if (includesAny(q, ['customer', 'buyer', 'loyal'])) {
+    if (top.length > 0) lines.push(`Top customers: ${top.map((c) => `${c.name} (${formatCurrency(c.total_spend)})`).join(', ')}.`);
   }
-
-  if (asksAboutAlerts) {
-    lines.push(`There are ${activeAlerts.length} active alerts right now.`);
-    if (activeAlerts.length > 0) {
-      lines.push(`Most relevant alerts: ${activeAlerts.slice(0, 3).map((alert) => alert.title).join(', ')}.`);
-    }
-  }
-
-  if (asksAboutCustomers) {
-    if (topCustomers.length > 0) {
-      lines.push(
-        `Top customers by spend are ${topCustomers
-          .map((customer) => `${customer.name} (${formatCurrency(customer.total_spend)}, ${customer.visit_count} visits)`)
-          .join(', ')}.`
-      );
-    } else {
-      lines.push("I couldn't load customer insights from the currently available data.");
-    }
-  }
-
-  if (lines.length === 0) {
-    if (summary) {
-      lines.push(
-        `Quick store summary: ${formatCurrency(summary.today_sales)} in sales across ${summary.today_transactions} transactions today.`
-      );
-    } else {
-      lines.push('I am using the latest operational data I could load from the app right now.');
-    }
-    if (lowStockProducts.length > 0) {
-      lines.push(`Low stock focus: ${lowStockProducts.slice(0, 3).map((product) => product.name).join(', ')}.`);
-    }
-    if (activeAlerts.length > 0) {
-      lines.push(`Active alerts: ${activeAlerts.length}.`);
-    }
-  }
-
-  if (asksAboutStock && lowStockProducts.length > 0) {
-    lines.push('Recommended next step: reorder or transfer stock for the first two items before they fall further below threshold.');
-  } else if (asksAboutSales && summary) {
-    lines.push('Recommended next step: compare this with your low stock list so strong sellers do not run out.');
-  } else if (asksAboutCustomers && topCustomers.length > 0) {
-    lines.push('Recommended next step: target your top repeat customers with availability updates or bundle offers.');
-  } else if (activeAlerts.length > 0) {
-    lines.push('Recommended next step: review the active alerts first because they are the clearest operational risks right now.');
-  }
-
-  lines.push('I answered from the working store APIs because the AI chat service is currently unavailable.');
+  if (lines.length === 0 && summary) lines.push(`Store summary: ${formatCurrency(summary.today_sales)} in sales, ${summary.today_transactions} transactions today.`);
+  lines.push('I answered from working store APIs because the AI service is currently unavailable.');
   return lines.join(' ');
 }
 
 async function buildAssistantFallback(storeId: string, query: string): Promise<Message> {
-  const dashboardPromise = apiService
-    .getLiveDashboardSummary(storeId)
-    .catch(() => apiService.getDashboardSummary(storeId));
-  const productsPromise = apiService.getProducts(storeId);
-  const alertsPromise = apiService.getAlerts(storeId, { status: 'ACTIVE' });
-  const customersPromise = apiService.getCustomers();
-
   const [dashboardResult, productsResult, alertsResult, customersResult] = await Promise.allSettled([
-    dashboardPromise,
-    productsPromise,
-    alertsPromise,
-    customersPromise,
+    apiService.getLiveDashboardSummary(storeId).catch(() => apiService.getDashboardSummary(storeId)),
+    apiService.getProducts(storeId),
+    apiService.getAlerts(storeId, { status: 'ACTIVE' }),
+    apiService.getCustomers(),
   ]);
-
   const summary = dashboardResult.status === 'fulfilled' ? dashboardResult.value.summary ?? null : null;
-  const freshness =
-    dashboardResult.status === 'fulfilled'
-      ? {
-          lastUpdatedAt: dashboardResult.value.analytics_last_updated_at,
-          status: dashboardResult.value.freshness_status,
-        }
-      : {
-          lastUpdatedAt: new Date().toISOString(),
-          status: 'fresh' as FreshnessStatus,
-        };
+  const freshness = dashboardResult.status === 'fulfilled'
+    ? { lastUpdatedAt: dashboardResult.value.analytics_last_updated_at, status: dashboardResult.value.freshness_status }
+    : { lastUpdatedAt: new Date().toISOString(), status: 'fresh' as FreshnessStatus };
   const products = productsResult.status === 'fulfilled' ? productsResult.value.items : [];
   const alerts = alertsResult.status === 'fulfilled' ? alertsResult.value.items : [];
   const customers = customersResult.status === 'fulfilled' ? customersResult.value.items : [];
-
   return {
     id: `fallback-${Date.now()}`,
     role: 'assistant',
     text: buildFallbackAnswer(query, summary, products, alerts, customers),
     grounding: {
       analytics_used: summary !== null && fallbackUsesAnalytics(query),
-      alerts_used: alerts.slice(0, 5).map((alert) => alert.alert_id),
-      inventory_products_used: products.filter(isLowStock).slice(0, 5).map((product) => product.product_id),
+      alerts_used: alerts.slice(0, 5).map((a) => a.alert_id),
+      inventory_products_used: products.filter(isLowStock).slice(0, 5).map((p) => p.product_id),
     },
     freshness,
   };
+}
+
+function GroundingChips({ grounding }: { grounding: Message['grounding'] }) {
+  if (!grounding) return null;
+  const hasRag = (grounding.rag_products_used?.length ?? 0) > 0;
+  const hasInventory = (grounding.inventory_products_used?.length ?? 0) > 0;
+  const hasAlerts = (grounding.alerts_used?.length ?? 0) > 0;
+  if (!grounding.analytics_used && !hasAlerts && !hasInventory && !hasRag) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {grounding.analytics_used && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-600 dark:text-blue-400">
+          <BarChart3 className="h-3 w-3" /> Analytics
+        </span>
+      )}
+      {hasAlerts && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-xs text-amber-600 dark:text-amber-400">
+          <AlertTriangle className="h-3 w-3" /> {grounding.alerts_used!.length} Alert{grounding.alerts_used!.length !== 1 ? 's' : ''}
+        </span>
+      )}
+      {hasInventory && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-400">
+          <Package className="h-3 w-3" /> {grounding.inventory_products_used!.length} Product{grounding.inventory_products_used!.length !== 1 ? 's' : ''}
+        </span>
+      )}
+      {hasRag && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-xs text-purple-600 dark:text-purple-400">
+          <Search className="h-3 w-3" /> {grounding.rag_products_used!.length} Vector Match{grounding.rag_products_used!.length !== 1 ? 'es' : ''}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <div className="flex max-w-[80%] gap-3">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
+        <Bot className="h-4 w-4 text-muted-foreground" />
+      </div>
+      <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-border bg-muted/50 px-4 py-3">
+        <span className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:0ms]" />
+        <span className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:150ms]" />
+        <span className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:300ms]" />
+      </div>
+    </div>
+  );
 }
 
 export default function AIChat() {
@@ -266,323 +195,291 @@ export default function AIChat() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [sessionIds, setSessionIds] = useState<string[]>([]);
-  const [chatSessionId, setChatSessionId] = useState<string>('');
+  const [chatSessionId, setChatSessionId] = useState('');
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [syncState, setSyncState] = useState<SyncState>('idle');
+  const [syncResult, setSyncResult] = useState<{ embedded: number; product_count: number } | null>(null);
+  const [syncError, setSyncError] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const localOnlySessionIdsRef = useRef<Set<string>>(new Set());
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const localOnlyRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const existing = readSavedSessions();
-    if (existing.length > 0) {
-      setSessionIds(existing);
-      setChatSessionId(existing[0]);
-      return;
-    }
-
-    const nextSessionId = makeSessionId();
-    localOnlySessionIdsRef.current.add(nextSessionId);
-    setSessionIds([nextSessionId]);
-    setChatSessionId(nextSessionId);
-    persistSessions([nextSessionId]);
+    if (existing.length > 0) { setSessionIds(existing); setChatSessionId(existing[0]); return; }
+    const id = makeSessionId();
+    localOnlyRef.current.add(id);
+    setSessionIds([id]); setChatSessionId(id); persistSessions([id]);
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, isLoading]);
 
   useEffect(() => {
-    if (!chatSessionId) {
-      return;
-    }
-
-    if (localOnlySessionIdsRef.current.has(chatSessionId)) {
-      setMessages([]);
-      setHistoryLoading(false);
-      return;
-    }
-
-    async function loadHistory() {
+    if (!chatSessionId) return;
+    if (localOnlyRef.current.has(chatSessionId)) { setMessages([]); setHistoryLoading(false); return; }
+    async function load() {
       setHistoryLoading(true);
       try {
         const res = await apiService.getChatSessionHistory(chatSessionId);
-        setMessages(
-          res.messages.map((message, index) => ({
-            id: `${chatSessionId}-${index}`,
-            role: message.role,
-            text: message.role === 'assistant' ? normalizeAssistantText(message.text) : message.text,
-          }))
-        );
-      } catch (error) {
-        if (isMissingChatSessionError(error)) {
-          setMessages([]);
-          removeSession(chatSessionId);
-
-          const remainingSessions = readSavedSessions().filter((sessionId) => sessionId !== chatSessionId);
-          if (remainingSessions.length > 0) {
-            setChatSessionId((currentSessionId) =>
-              currentSessionId === chatSessionId ? remainingSessions[0] : currentSessionId
-            );
+        setMessages(res.messages.map((m, i) => ({
+          id: `${chatSessionId}-${i}`,
+          role: m.role,
+          text: m.role === 'assistant' ? normalizeAssistantText(m.text) : m.text,
+        })));
+      } catch (err) {
+        if (isMissingChatSessionError(err)) {
+          setMessages([]); removeSession(chatSessionId);
+          const remaining = readSavedSessions().filter((id) => id !== chatSessionId);
+          if (remaining.length > 0) {
+            setChatSessionId((cur) => cur === chatSessionId ? remaining[0] : cur);
           } else {
-            const nextSessionId = makeSessionId();
-            localOnlySessionIdsRef.current.add(nextSessionId);
-            persistSessions([nextSessionId]);
-            setSessionIds([nextSessionId]);
-            setChatSessionId((currentSessionId) =>
-              currentSessionId === chatSessionId ? nextSessionId : currentSessionId
-            );
+            const next = makeSessionId();
+            localOnlyRef.current.add(next);
+            persistSessions([next]); setSessionIds([next]);
+            setChatSessionId((cur) => cur === chatSessionId ? next : cur);
           }
         } else {
-          setMessages([
-            {
-              id: `${chatSessionId}-error`,
-              role: 'assistant',
-              text: getErrorMessage(error, 'Failed to load chat session history.'),
-            },
-          ]);
+          setMessages([{ id: `${chatSessionId}-err`, role: 'assistant', text: getErrorMessage(err, 'Failed to load chat history.') }]);
         }
-      } finally {
-        setHistoryLoading(false);
-      }
+      } finally { setHistoryLoading(false); }
     }
-
-    void loadHistory();
+    void load();
   }, [chatSessionId]);
 
-  function ensureSessionRegistered(sessionId: string) {
-    setSessionIds((prev) => {
-      if (prev.includes(sessionId)) {
-        return prev;
-      }
-      const next = [sessionId, ...prev];
-      persistSessions(next);
-      return next;
-    });
+  function ensureRegistered(id: string) {
+    setSessionIds((prev) => { if (prev.includes(id)) return prev; const next = [id, ...prev]; persistSessions(next); return next; });
   }
-
-  function removeSession(sessionId: string) {
-    setSessionIds((prev) => {
-      const next = prev.filter((value) => value !== sessionId);
-      persistSessions(next);
-      return next;
-    });
+  function removeSession(id: string) {
+    setSessionIds((prev) => { const next = prev.filter((s) => s !== id); persistSessions(next); return next; });
   }
-
   function handleNewSession() {
-    const nextSessionId = makeSessionId();
-    localOnlySessionIdsRef.current.add(nextSessionId);
-    ensureSessionRegistered(nextSessionId);
-    setChatSessionId(nextSessionId);
-    setMessages([]);
+    const id = makeSessionId();
+    localOnlyRef.current.add(id); ensureRegistered(id); setChatSessionId(id); setMessages([]);
   }
 
   async function handleSend() {
-    if (!input.trim() || !storeId || !chatSessionId) {
-      return;
-    }
-
-    ensureSessionRegistered(chatSessionId);
-
-    const userMsg: Message = {
-      id: `${chatSessionId}-${Date.now()}-user`,
-      role: 'user',
-      text: input.trim(),
-    };
-
+    if (!input.trim() || !storeId || !chatSessionId || isLoading) return;
+    ensureRegistered(chatSessionId);
+    const userMsg: Message = { id: `${chatSessionId}-${Date.now()}-user`, role: 'user', text: input.trim() };
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setIsLoading(true);
-
     try {
       const res = await apiService.askAI(storeId, chatSessionId, userMsg.text);
-      localOnlySessionIdsRef.current.delete(chatSessionId);
-      localOnlySessionIdsRef.current.delete(res.chat_session_id);
-      ensureSessionRegistered(res.chat_session_id);
-      const aiMsg: Message = {
+      localOnlyRef.current.delete(chatSessionId);
+      localOnlyRef.current.delete(res.chat_session_id);
+      ensureRegistered(res.chat_session_id);
+      setMessages((prev) => [...prev, {
         id: `${res.request_id}-assistant`,
         role: 'assistant',
         text: normalizeAssistantText(res.answer),
         grounding: res.grounding,
-        freshness: {
-          lastUpdatedAt: res.analytics_last_updated_at,
-          status: res.freshness_status,
-        },
-      };
-      setMessages((prev) => [...prev, aiMsg]);
-    } catch (error) {
+        freshness: { lastUpdatedAt: res.analytics_last_updated_at, status: res.freshness_status },
+      }]);
+    } catch (err) {
       try {
-        const fallbackMessage = await buildAssistantFallback(storeId, userMsg.text);
-        setMessages((prev) => [...prev, fallbackMessage]);
-      } catch (fallbackError) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `${chatSessionId}-${Date.now()}-error`,
-            role: 'assistant',
-            text: getErrorMessage(
-              fallbackError,
-              getErrorMessage(error, 'Sorry, I encountered an error while processing your request.')
-            ),
-          },
-        ]);
+        const fb = await buildAssistantFallback(storeId, userMsg.text);
+        setMessages((prev) => [...prev, fb]);
+      } catch (fbErr) {
+        setMessages((prev) => [...prev, { id: `${chatSessionId}-${Date.now()}-err`, role: 'assistant', text: getErrorMessage(fbErr, getErrorMessage(err, 'Sorry, an error occurred.')) }]);
       }
-    } finally {
-      setIsLoading(false);
+    } finally { setIsLoading(false); }
+  }
+
+  async function handleSyncEmbeddings() {
+    if (!storeId || syncState === 'syncing') return;
+    setSyncState('syncing'); setSyncResult(null); setSyncError('');
+    try {
+      const res = await apiService.syncEmbeddings(storeId);
+      setSyncResult(res); setSyncState('success');
+      setTimeout(() => setSyncState('idle'), 5000);
+    } catch (err) {
+      setSyncError(getErrorMessage(err, 'Embedding sync failed.')); setSyncState('error');
+      setTimeout(() => setSyncState('idle'), 5000);
     }
   }
 
+  const quickPrompts = [
+    "What needs attention right now?",
+    "Show current inventory status",
+    "Any new products added recently?",
+    "Summarize today's sales",
+  ];
+
   return (
     <AppLayout>
-      <div className="grid h-[calc(100vh-4rem)] gap-6 lg:grid-cols-[280px_1fr]">
-        <Card className="overflow-hidden">
-          <CardContent className="flex h-full flex-col gap-4 p-4">
+      {/* Fixed-height grid — only the messages area scrolls */}
+      <div className="grid h-[calc(100vh-4rem)] gap-4 overflow-hidden lg:grid-cols-[260px_1fr]">
+
+        {/* ── Sidebar ── */}
+        <Card className="flex flex-col overflow-hidden">
+          <CardContent className="flex min-h-0 flex-1 flex-col gap-3 p-3">
             <div className="flex items-center justify-between">
               <div>
-                <h1 className="text-lg font-semibold">AI Sessions</h1>
-                <p className="text-sm text-muted-foreground">Stored chat history from the backend contract.</p>
+                <h2 className="text-sm font-semibold">Sessions</h2>
+                <p className="text-xs text-muted-foreground">Chat history</p>
               </div>
-              <Button size="sm" variant="outline" onClick={handleNewSession}>
+              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleNewSession}>
                 New
               </Button>
             </div>
 
-            <div className="space-y-2 overflow-y-auto">
-              {sessionIds.map((sessionId) => (
+            {/* Session list */}
+            <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+              {sessionIds.map((id) => (
                 <button
-                  key={sessionId}
+                  key={id}
                   type="button"
-                  onClick={() => setChatSessionId(sessionId)}
+                  onClick={() => setChatSessionId(id)}
                   className={cn(
-                    'w-full rounded-md border px-3 py-2 text-left text-sm transition-colors',
-                    sessionId === chatSessionId
-                      ? 'border-primary bg-primary/10 text-foreground'
-                      : 'border-border text-muted-foreground hover:bg-muted/40'
+                    'w-full truncate rounded-md border px-2.5 py-2 text-left text-xs transition-colors',
+                    id === chatSessionId
+                      ? 'border-primary bg-primary/10 font-medium text-foreground'
+                      : 'border-transparent text-muted-foreground hover:border-border hover:bg-muted/40'
                   )}
                 >
-                  <div className="font-medium">{sessionId}</div>
-                  <div className="text-xs">GET /api/v1/ai/chat/sessions/{'{chat_session_id}'}</div>
+                  <span className="block truncate font-mono">{id.slice(0, 20)}…</span>
                 </button>
               ))}
+            </div>
+
+            {/* ── Sync Embeddings button ── */}
+            <div className="border-t border-border pt-3">
+              <Button
+                size="sm"
+                variant="outline"
+                className={cn(
+                  'w-full gap-2 text-xs transition-colors',
+                  syncState === 'success' && 'border-emerald-500 text-emerald-600 hover:bg-emerald-500/10',
+                  syncState === 'error' && 'border-red-500 text-red-600 hover:bg-red-500/10',
+                )}
+                disabled={syncState === 'syncing' || !storeId}
+                onClick={handleSyncEmbeddings}
+              >
+                {syncState === 'syncing' && <RefreshCw className="h-3 w-3 animate-spin" />}
+                {syncState === 'success' && <CheckCircle2 className="h-3 w-3" />}
+                {syncState === 'error' && <XCircle className="h-3 w-3" />}
+                {syncState === 'idle' && <Sparkles className="h-3 w-3" />}
+                {syncState === 'syncing' ? 'Updating…' : syncState === 'success' ? 'Updated!' : syncState === 'error' ? 'Failed' : 'Update RAG Context'}
+              </Button>
+
+              {syncState === 'success' && syncResult && (
+                <p className="mt-1.5 text-center text-xs text-emerald-600 dark:text-emerald-400">
+                  {syncResult.embedded} / {syncResult.product_count} products embedded
+                </p>
+              )}
+              {syncState === 'error' && syncError && (
+                <p className="mt-1.5 text-center text-xs text-red-500">{syncError}</p>
+              )}
+              <p className="mt-1.5 text-center text-xs text-muted-foreground">
+                Rebuilds the AI vector search index for this store
+              </p>
             </div>
           </CardContent>
         </Card>
 
-        <div className="flex flex-col">
-          <div className="mb-6 flex items-start justify-between gap-4">
+        {/* ── Main chat column ── */}
+        <div className="flex min-h-0 flex-col overflow-hidden">
+          {/* Header */}
+          <div className="mb-3 flex items-start justify-between gap-4 shrink-0">
             <div>
-              <h1 className="text-3xl font-bold tracking-tight">AI Assistant</h1>
-              <p className="text-muted-foreground">
-                Use it like a store copilot for priorities, stock risks, recent product additions, and sales follow-up.
+              <h1 className="text-2xl font-bold tracking-tight">AI Assistant</h1>
+              <p className="text-sm text-muted-foreground">
+                Ask about stock risks, sales trends, recent products, or next best actions.
               </p>
             </div>
-            <Button variant="outline" onClick={handleNewSession}>
+            <Button variant="outline" size="sm" onClick={handleNewSession}>
               New Session
             </Button>
           </div>
 
-          <Card className="flex flex-1 flex-col overflow-hidden">
-            <CardContent className="flex-1 space-y-6 overflow-y-auto p-6">
+          {/* Chat card — takes remaining height */}
+          <Card className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            {/* Messages */}
+            <div ref={messagesContainerRef} className="min-h-0 flex-1 overflow-y-auto p-4 space-y-4">
               {historyLoading ? (
-                <div className="text-sm text-muted-foreground">Loading chat history...</div>
+                <div className="flex h-full items-center justify-center">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <RefreshCw className="h-4 w-4 animate-spin" /> Loading history…
+                  </div>
+                </div>
               ) : messages.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center space-y-4 text-muted-foreground">
-                  <Bot className="h-12 w-12 opacity-20" />
-                  <div className="space-y-2 text-center">
-                    <p>Ask for the next best action, not just raw numbers.</p>
-                    <p className="text-sm">
-                      Try: &quot;What needs attention right now?&quot;, &quot;Tell current inventory status&quot;, or &quot;Tell about new product added in inventory&quot;.
-                    </p>
+                <div className="flex h-full flex-col items-center justify-center gap-6 text-muted-foreground">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
+                    <Bot className="h-7 w-7 text-primary" />
+                  </div>
+                  <div className="space-y-1 text-center">
+                    <p className="font-medium text-foreground">Ask your store copilot</p>
+                    <p className="text-sm">Get priorities, stock risks, and sales insights.</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 w-full max-w-sm">
+                    {quickPrompts.map((prompt) => (
+                      <button
+                        key={prompt}
+                        type="button"
+                        onClick={() => setInput(prompt)}
+                        className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      >
+                        {prompt}
+                      </button>
+                    ))}
                   </div>
                 </div>
               ) : (
-                messages.map((msg) => (
-                  <div
-                    key={msg.id}
-                    className={cn('flex max-w-[80%] gap-4', msg.role === 'user' ? 'ml-auto flex-row-reverse' : '')}
-                  >
+                <>
+                  {messages.map((msg) => (
                     <div
-                      className={cn(
+                      key={msg.id}
+                      className={cn('flex gap-3', msg.role === 'user' ? 'flex-row-reverse' : '')}
+                    >
+                      <div className={cn(
                         'flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
                         msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'
-                      )}
-                    >
-                      {msg.role === 'user' ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
-                    </div>
-                    <div className="space-y-2">
-                      <div
-                        className={cn(
-                          'rounded-lg p-4',
-                          msg.role === 'user'
-                            ? 'bg-primary text-primary-foreground'
-                            : 'border border-border bg-muted/50'
-                        )}
-                      >
-                        {msg.text}
+                      )}>
+                        {msg.role === 'user' ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
                       </div>
-
-                      {msg.role === 'assistant' && msg.grounding ? (
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {msg.grounding.analytics_used ? (
-                            <div className="flex items-center gap-1 rounded bg-muted px-2 py-1 text-xs text-muted-foreground">
-                              <BarChart3 className="h-3 w-3" />
-                              Analytics
-                            </div>
-                          ) : null}
-                          {msg.grounding.alerts_used && msg.grounding.alerts_used.length > 0 ? (
-                            <div className="flex items-center gap-1 rounded bg-muted px-2 py-1 text-xs text-muted-foreground">
-                              <AlertTriangle className="h-3 w-3" />
-                              {msg.grounding.alerts_used.length} Alerts
-                            </div>
-                          ) : null}
-                          {msg.grounding.inventory_products_used && msg.grounding.inventory_products_used.length > 0 ? (
-                            <div className="flex items-center gap-1 rounded bg-muted px-2 py-1 text-xs text-muted-foreground">
-                              <Package className="h-3 w-3" />
-                              {msg.grounding.inventory_products_used.length} Products
-                            </div>
-                          ) : null}
+                      <div className={cn('max-w-[78%] space-y-1.5', msg.role === 'user' && 'items-end')}>
+                        <div className={cn(
+                          'rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap',
+                          msg.role === 'user'
+                            ? 'rounded-tr-sm bg-primary text-primary-foreground'
+                            : 'rounded-tl-sm border border-border bg-muted/50 text-foreground'
+                        )}>
+                          {msg.text}
                         </div>
-                      ) : null}
-
-                      {msg.role === 'assistant' && msg.freshness && msg.grounding?.analytics_used ? (
-                        <FreshnessBadge
-                          lastUpdatedAt={msg.freshness.lastUpdatedAt}
-                          status={msg.freshness.status}
-                        />
-                      ) : null}
+                        {msg.role === 'assistant' && <GroundingChips grounding={msg.grounding} />}
+                        {msg.role === 'assistant' && msg.freshness && msg.grounding?.analytics_used && (
+                          <FreshnessBadge lastUpdatedAt={msg.freshness.lastUpdatedAt} status={msg.freshness.status} />
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  ))}
+                  {isLoading && <TypingIndicator />}
+                </>
               )}
-              {isLoading ? (
-                <div className="flex max-w-[80%] gap-4">
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
-                    <Bot className="h-4 w-4" />
-                  </div>
-                  <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/50 p-4">
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:0.2s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:0.4s]" />
-                  </div>
-                </div>
-              ) : null}
               <div ref={messagesEndRef} />
-            </CardContent>
+            </div>
 
-            <div className="border-t border-border bg-card p-4">
+            {/* Input bar */}
+            <div className="shrink-0 border-t border-border bg-card p-3">
               <form
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void handleSend();
-                }}
+                onSubmit={(e) => { e.preventDefault(); void handleSend(); }}
                 className="flex gap-2"
               >
                 <Input
                   value={input}
-                  onChange={(event) => setInput(event.target.value)}
-                  placeholder="Ask what changed, what needs attention, or which new product was added..."
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="Ask what changed, what needs attention, or about a product…"
                   disabled={isLoading}
-                  className="flex-1"
+                  className="flex-1 text-sm"
                 />
-                <Button type="submit" disabled={isLoading || !input.trim() || !storeId || !chatSessionId}>
+                <Button
+                  type="submit"
+                  size="icon"
+                  disabled={isLoading || !input.trim() || !storeId || !chatSessionId}
+                >
                   <Send className="h-4 w-4" />
                 </Button>
               </form>

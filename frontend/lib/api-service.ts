@@ -390,4 +390,16 @@ export const apiService = {
     const res = await apiClient.get(`/ai/chat/sessions/${chatSessionId}`);
     return res.data;
   },
+
+  syncEmbeddings: async (
+    storeId: string
+  ): Promise<{ embedded: number; product_count: number }> => {
+    if (useMocks) {
+      // Simulate a short delay in mock mode
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      return { embedded: 42, product_count: 42 };
+    }
+    const res = await apiClient.post('/ai/embed-sync', { store_id: storeId });
+    return res.data;
+  },
 };

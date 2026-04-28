@@ -8,11 +8,13 @@ import { apiService } from '@/lib/api-service';
 import { useAuth } from '@/components/auth-provider';
 import { AlertsSummary, DashboardSummary } from '@/lib/types';
 import { FreshnessBadge } from '@/components/freshness-badge';
-import { DollarSign, ShoppingCart, Bell, PackageX, CheckCircle2, ArrowRight } from 'lucide-react';
+import { IndianRupee, ShoppingCart, Bell, PackageX, CheckCircle2, ArrowRight } from 'lucide-react';
 import { toast } from 'sonner';
 import { getErrorMessage } from '@/lib/errors';
 import Link from 'next/link';
 import { subscribeToDataChanged } from '@/lib/data-events';
+
+const DASHBOARD_REFRESH_INTERVAL_MS = 60000;
 
 export default function Dashboard() {
   const { storeId } = useAuth();
@@ -98,13 +100,22 @@ export default function Dashboard() {
     const unsubscribe = subscribeToDataChanged(() => {
       void fetchDashboard(false);
     });
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchDashboard(false);
+      }
+    };
     const intervalId = window.setInterval(() => {
-      void fetchDashboard(false);
-    }, 15000);
+      if (document.visibilityState === 'visible') {
+        void fetchDashboard(false);
+      }
+    }, DASHBOARD_REFRESH_INTERVAL_MS);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       unsubscribe();
       window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [fetchDashboard, storeId]);
 
@@ -121,8 +132,8 @@ export default function Dashboard() {
   const statsCards = [
     {
       title: "Today's Sales",
-      value: `$${(summary?.today_sales || 0).toLocaleString()}`,
-      icon: DollarSign,
+      value: `₹${(summary?.today_sales || 0).toLocaleString()}`,
+      icon: IndianRupee,
       valueClassName: 'text-2xl font-bold',
     },
     {

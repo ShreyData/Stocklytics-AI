@@ -232,6 +232,7 @@ export interface AIGrounding {
   analytics_used: boolean;
   alerts_used: string[];
   inventory_products_used: string[];
+  rag_products_used?: string[];
 }
 
 export interface AIChatResponse {
