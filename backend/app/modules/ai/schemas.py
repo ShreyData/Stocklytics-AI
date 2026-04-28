@@ -23,6 +23,12 @@ class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, description="The business question asked by the user.")
 
 
+class EmbedSyncRequest(BaseModel):
+    """Payload for POST /api/v1/ai/embed-sync."""
+
+    store_id: str = Field(..., description="The store whose embeddings should be rebuilt.")
+
+
 # ---------------------------------------------------------------------------
 # Response / shape models
 # ---------------------------------------------------------------------------
@@ -33,6 +39,7 @@ class GroundingInfo(BaseModel):
     analytics_used: bool
     alerts_used: list[str] = Field(default_factory=list)
     inventory_products_used: list[str] = Field(default_factory=list)
+    rag_products_used: list[str] = Field(default_factory=list)
 
 
 class ChatMessage(BaseModel):

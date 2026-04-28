@@ -41,6 +41,11 @@ from app.common.config import get_settings
 logger = logging.getLogger(__name__)
 
 _settings = get_settings()
+_BIGQUERY_CAST_TYPE_MAP = {
+    "FLOAT": "FLOAT64",
+    "INTEGER": "INT64",
+    "BOOLEAN": "BOOL",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +133,8 @@ def _merge_query(
     def _expr_for(col: str) -> str:
         field_type = target_schema.get(col, "").upper()
         source = f"S.{col}"
-        if field_type in {"NUMERIC", "BIGNUMERIC", "INT64", "FLOAT64", "BOOL", "DATE", "DATETIME", "TIME", "TIMESTAMP"}:
+        if field_type:
+            field_type = _BIGQUERY_CAST_TYPE_MAP.get(field_type, field_type)
             return f"CAST({source} AS {field_type})"
         return source
 

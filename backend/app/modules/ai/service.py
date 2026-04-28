@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -85,11 +86,20 @@ def _build_context_block(
     inventory: list[dict[str, Any]],
     customers: list[dict[str, Any]],
     transactions: list[dict[str, Any]],
+    rag_products: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     """
     Build the strict JSON-shaped context block required by ai_system_design.md.
     Only compact, approved fields are included.
+    rag_products (optional) adds semantically retrieved products from BigQuery
+    Vector Search to augment the deterministic inventory snapshot.
     """
+    alerts = alerts[:6]
+    inventory = inventory[:8]
+    customers = customers[:5]
+    transactions = transactions[:6]
+    rag_products = (rag_products or [])[:4]
+
     payload = {
         "analytics_summary": analytics_summary,
         "alerts": [
@@ -119,6 +129,15 @@ def _build_context_block(
                 "updated_at": product.get("updated_at"),
             }
             for product in inventory
+        ],
+        "rag_relevant_products": [
+            {
+                "product_id": p.get("product_id"),
+                "product_name": p.get("product_name"),
+                "category": p.get("category"),
+                "retrieval_note": "semantically matched to query via vector search",
+            }
+            for p in rag_products
         ],
         "customer_snapshot": [
             {
@@ -187,12 +206,14 @@ def _extract_grounding(
     alerts: list[dict[str, Any]],
     inventory: list[dict[str, Any]],
     analytics_used: bool,
+    rag_products: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Build the grounding metadata object for the API response."""
     return {
         "analytics_used": analytics_used,
         "alerts_used": [a.get("alert_id", "") for a in alerts],
         "inventory_products_used": [p.get("product_id", "") for p in inventory],
+        "rag_products_used": [p.get("product_id", "") for p in (rag_products or [])],
     }
 
 
@@ -840,13 +861,72 @@ async def _await_with_timeout(coro, timeout_seconds: float):
     return await asyncio.wait_for(coro, timeout=timeout_seconds)
 
 
+_EMBED_QUERY_MODEL_FALLBACKS = ("gemini-embedding-001",)
+
+
+def _query_embedding_model_candidates(preferred_model: str) -> list[str]:
+    ordered: list[str] = []
+    for model_name in (preferred_model, *_EMBED_QUERY_MODEL_FALLBACKS):
+        if model_name and model_name not in ordered:
+            ordered.append(model_name)
+    return ordered
+
+
+async def _embed_query(query: str) -> Optional[list[float]]:
+    """Generate a query embedding via Gemini embedding models.
+
+    Returns None on any failure so the caller can skip vector retrieval
+    and fall through to the deterministic context path.
+    """
+    settings = get_settings()
+    if not settings.gemini_api_key:
+        return None
+    headers = {
+        "x-goog-api-key": settings.gemini_api_key,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for model in _query_embedding_model_candidates(settings.gemini_embedding_model):
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models"
+                f"/{model}:embedContent"
+            )
+            payload = {
+                "model": f"models/{model}",
+                "content": {"parts": [{"text": query}]},
+                "taskType": "RETRIEVAL_QUERY",
+            }
+            try:
+                response = await client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                return response.json()["embedding"]["values"]
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {400, 404}:
+                    logger.warning(
+                        "Query embedding model unavailable; trying fallback model",
+                        extra={"model": model, "status_code": exc.response.status_code},
+                    )
+                    continue
+                logger.warning(
+                    "Query embedding failed; skipping RAG retrieval",
+                    exc_info=exc,
+                )
+                return None
+            except Exception as exc:
+                logger.warning(
+                    "Query embedding failed; skipping RAG retrieval",
+                    exc_info=exc,
+                )
+                return None
+    return None
+
+
 async def _generate_model_answer(prompt: str) -> str:
     """Call the hosted model using the official REST API with the configured API key."""
     settings = get_settings()
     if not settings.gemini_api_key:
         raise AIProviderError("GEMINI_API_KEY is not configured.")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemma_model_id}:generateContent"
     payload = {
         "contents": [
             {
@@ -856,18 +936,79 @@ async def _generate_model_answer(prompt: str) -> str:
                     }
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "topP": 0.8,
+            "maxOutputTokens": 220,
+        },
     }
     headers = {
         "x-goog-api-key": settings.gemini_api_key,
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=_MODEL_TIMEOUT_SECONDS) as client:
-        response = await client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        body = response.json()
+    timeout_seconds = max(float(settings.gemini_model_timeout_seconds), 1.0)
+    model_candidates = _generation_model_candidates(
+        settings.gemma_model_id,
+        settings.gemini_model_fallbacks,
+    )
+    max_retries = max(int(settings.gemini_generation_retries), 0)
+    last_error: Exception | None = None
 
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        for model in model_candidates:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            for attempt in range(max_retries + 1):
+                try:
+                    response = await client.post(url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    body = response.json()
+                    return _extract_model_text(body)
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    status_code = exc.response.status_code
+                    if status_code in {400, 404}:
+                        logger.warning(
+                            "Hosted model unavailable or invalid; trying next model",
+                            extra={"model": model, "status_code": status_code},
+                        )
+                        break
+                    if _should_retry_model_error(exc) and attempt < max_retries:
+                        await _sleep_before_retry(attempt, model=model, reason=f"http_{status_code}")
+                        continue
+                    logger.warning(
+                        "Hosted model request failed",
+                        exc_info=exc,
+                        extra={"model": model, "status_code": status_code, "attempt": attempt + 1},
+                    )
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if _should_retry_model_error(exc) and attempt < max_retries:
+                        await _sleep_before_retry(attempt, model=model, reason=exc.__class__.__name__)
+                        continue
+                    logger.warning(
+                        "Hosted model request failed",
+                        exc_info=exc,
+                        extra={"model": model, "attempt": attempt + 1},
+                    )
+                    break
+
+    if last_error is not None:
+        raise AIProviderError(f"Hosted model request failed after retries: {last_error}")
+    raise AIProviderError("No hosted model candidates are configured.")
+
+
+def _generation_model_candidates(primary_model: str, fallback_models: list[str]) -> list[str]:
+    ordered: list[str] = []
+    for model_name in (primary_model, *fallback_models):
+        if model_name and model_name not in ordered:
+            ordered.append(model_name)
+    return ordered
+
+
+def _extract_model_text(body: dict[str, Any]) -> str:
     candidates = body.get("candidates") or []
     for candidate in candidates:
         content = candidate.get("content") or {}
@@ -881,6 +1022,23 @@ async def _generate_model_answer(prompt: str) -> str:
     if block_reason:
         raise AIProviderError(f"Model response was blocked: {block_reason}")
     raise AIProviderError("Model response did not contain any text.")
+
+
+def _should_retry_model_error(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {408, 429, 500, 502, 503, 504}
+    return False
+
+
+async def _sleep_before_retry(attempt: int, *, model: str, reason: str) -> None:
+    delay_seconds = min(1.0 * (2**attempt) + random.uniform(0.0, 0.25), 6.0)
+    logger.warning(
+        "Retrying hosted model request after transient failure",
+        extra={"model": model, "retry_in_seconds": round(delay_seconds, 2), "reason": reason},
+    )
+    await asyncio.sleep(delay_seconds)
 
 
 async def _get_live_dashboard_summary_fallback(
@@ -949,6 +1107,32 @@ def _get_related_product_ids(alerts: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _query_requests_deeper_reasoning(query: str) -> bool:
+    phrases = (
+        "why",
+        "how",
+        "compare",
+        "trend",
+        "forecast",
+        "predict",
+        "recommend strategy",
+        "what should i do next",
+        "explain",
+        "root cause",
+    )
+    lowered = query.lower()
+    return any(phrase in lowered for phrase in phrases)
+
+
+def _should_use_operator_answer_directly(query: str, operator_answer: Optional[str]) -> bool:
+    """Return True for routine operational queries that don't need full model generation."""
+    if not operator_answer:
+        return False
+    if _query_requests_deeper_reasoning(query):
+        return False
+    return _query_prefers_operator_answer(query)
+
+
 # ---------------------------------------------------------------------------
 # Public service methods
 # ---------------------------------------------------------------------------
@@ -1002,12 +1186,31 @@ class AIService:
 
         last_updated, freshness_status = _resolve_freshness_fields(metadata)
 
-        # Step 2: Fetch context data
-        try:
-            alerts = await _await_with_timeout(
+        # Step 2: Fetch independent context data in parallel
+        alerts_task = asyncio.create_task(
+            _await_with_timeout(
                 repository.get_relevant_alerts_snapshot(store_id),
                 _CONTEXT_TIMEOUT_SECONDS,
             )
+        )
+        customers_task = asyncio.create_task(
+            _await_with_timeout(
+                repository.get_customer_snapshot(
+                    store_id,
+                    query_text=query,
+                ),
+                _CONTEXT_TIMEOUT_SECONDS,
+            )
+        )
+        query_embedding_task = asyncio.create_task(
+            _await_with_timeout(
+                _embed_query(query),
+                _CONTEXT_TIMEOUT_SECONDS,
+            )
+        )
+
+        try:
+            alerts = await alerts_task
         except Exception as exc:
             logger.warning(
                 "Alerts snapshot read failed; continuing without alerts context",
@@ -1035,13 +1238,7 @@ class AIService:
             inventory = []
             degraded_context = True
         try:
-            customers = await _await_with_timeout(
-                repository.get_customer_snapshot(
-                    store_id,
-                    query_text=query,
-                ),
-                _CONTEXT_TIMEOUT_SECONDS,
-            )
+            customers = await customers_task
         except Exception as exc:
             logger.warning(
                 "Customer snapshot read failed; continuing without customer context",
@@ -1068,6 +1265,30 @@ class AIService:
             )
             transactions = []
             degraded_context = True
+
+        # Step 2b: RAG — vector retrieval (non-blocking; degrades gracefully)
+        rag_products: list[dict[str, Any]] = []
+        try:
+            _query_embedding = await query_embedding_task
+            if _query_embedding:
+                _rag_top_k = get_settings().vector_search_top_k
+                rag_products = await _await_with_timeout(
+                    repository.vector_search_products(
+                        store_id,
+                        query_embedding=_query_embedding,
+                        top_k=_rag_top_k,
+                    ),
+                    _CONTEXT_TIMEOUT_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning(
+                "RAG vector retrieval failed; continuing without vector context",
+                exc_info=exc,
+                extra={"store_id": store_id},
+            )
+            rag_products = []
+            degraded_context = True
+
         try:
             analytics_context = await _await_with_timeout(
                 repository.get_analytics_context(
@@ -1124,7 +1345,10 @@ class AIService:
             degraded_context = degraded_context or live_summary_is_fallback
 
         # Step 3: Build prompt
-        context_block = _build_context_block(analytics_summary, alerts, inventory, customers, transactions)
+        context_block = _build_context_block(
+            analytics_summary, alerts, inventory, customers, transactions,
+            rag_products=rag_products,
+        )
         full_prompt = (
             f"{_SYSTEM_INSTRUCTION}\n\n"
             f"=== STRUCTURED CONTEXT JSON ===\n{context_block}\n\n"
@@ -1140,21 +1364,23 @@ class AIService:
             customers,
             transactions,
         )
-
-        try:
-            raw_answer = await _generate_model_answer(full_prompt)
-        except Exception as exc:
-            logger.error("Hosted model API call failed; using deterministic fallback answer", exc_info=exc)
-            raw_answer = _build_fallback_answer(
-                query=query,
-                analytics_summary=analytics_summary,
-                analytics_context=analytics_context,
-                alerts=alerts,
-                inventory=inventory,
-                customers=customers,
-                transactions=transactions,
-                freshness_status=freshness_status,
-            )
+        if _should_use_operator_answer_directly(query, operator_answer):
+            raw_answer = operator_answer or ""
+        else:
+            try:
+                raw_answer = await _generate_model_answer(full_prompt)
+            except Exception as exc:
+                logger.error("Hosted model API call failed; using deterministic fallback answer", exc_info=exc)
+                raw_answer = _build_fallback_answer(
+                    query=query,
+                    analytics_summary=analytics_summary,
+                    analytics_context=analytics_context,
+                    alerts=alerts,
+                    inventory=inventory,
+                    customers=customers,
+                    transactions=transactions,
+                    freshness_status=freshness_status,
+                )
 
         # Step 5: Guard response
         answer = _response_guard(raw_answer, freshness_status)
@@ -1164,6 +1390,7 @@ class AIService:
             alerts,
             inventory,
             analytics_used=_infer_analytics_used(query, answer, operator_analytics_used),
+            rag_products=rag_products,
         )
 
         # Step 6: Persist messages
@@ -1259,4 +1486,55 @@ class AIService:
         return {
             "chat_session_id": chat_session_id,
             "messages": shaped_messages,
+        }
+
+    async def sync_embeddings(self, *, store_id: str) -> dict[str, Any]:
+        """
+        Trigger on-demand product embedding sync for a store.
+
+        Fetches all products from Firestore and regenerates their vector
+        embeddings in BigQuery. Called from POST /api/v1/ai/embed-sync.
+
+        Returns:
+            { store_id, product_count, embedded }
+        """
+        from datetime import datetime, timezone
+
+        from app.common.google_clients import (
+            create_bigquery_client,
+            create_firestore_async_client,
+            get_default_gcp_project,
+        )
+        from app.modules.data_pipeline.embedding_sync import sync_product_embeddings
+
+        settings = get_settings()
+        db = create_firestore_async_client(project=settings.firestore_project_id or None)
+        bq = create_bigquery_client(project=get_default_gcp_project(settings))
+
+        products: list[dict[str, Any]] = []
+        async for doc in db.collection("products").where("store_id", "==", store_id).stream():
+            data = doc.to_dict() or {}
+            data.setdefault("product_id", doc.id)
+            products.append(data)
+
+        now = datetime.now(timezone.utc)
+        embedded_count = await sync_product_embeddings(
+            bq,
+            store_id=store_id,
+            products=products,
+            analytics_last_updated_at=now,
+        )
+
+        logger.info(
+            "On-demand embedding sync complete",
+            extra={
+                "store_id": store_id,
+                "product_count": len(products),
+                "embedded": embedded_count,
+            },
+        )
+        return {
+            "store_id": store_id,
+            "product_count": len(products),
+            "embedded": embedded_count,
         }

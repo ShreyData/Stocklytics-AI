@@ -1,0 +1,12 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - backend/Dockerfile
+      - -t
+      - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-backend:${SHORT_SHA}
+      - backend
+
+images:
+  - ${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPO}/stocklytics-backend:${SHORT_SHA}

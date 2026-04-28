@@ -18,11 +18,16 @@ pnpm-debug.log*
 
 # Next.js
 .next/
+*.tsbuildinfo
 
 # Env
 .env
 .env.*
 !.env.example
+!*.env.yaml.example
+
+# Cloud Run local deploy configs
+infra/cloudrun/*.env.yaml
 
 # OS
 .DS_Store

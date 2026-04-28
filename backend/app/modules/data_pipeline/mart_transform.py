@@ -151,7 +151,7 @@ def refresh_customer_summary(
             store_id,
             customer_id,
             name AS customer_name,
-            total_spend AS lifetime_spend,
+            CAST(total_spend AS NUMERIC) AS lifetime_spend,
             visit_count,
             last_purchase_at,
             TIMESTAMP '{analytics_last_updated_at}' AS analytics_last_updated_at
