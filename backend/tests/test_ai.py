@@ -565,7 +565,9 @@ class TestAIModelTransport:
             patch("app.modules.ai.service.get_settings") as settings_mock,
         ):
             settings_mock.return_value.gemini_api_key = "test-key"
-            settings_mock.return_value.gemma_model_id = "gemini-2.0-flash"
+            settings_mock.return_value.ai_primary_model_id = "gemini-2.0-flash"
+            settings_mock.return_value.ai_default_model_id = "gemini-2.0-flash"
+            settings_mock.return_value.ai_reasoning_model_id = "gemini-2.0-flash"
             settings_mock.return_value.gemini_model_fallbacks = []
             settings_mock.return_value.gemini_generation_retries = 0
             settings_mock.return_value.gemini_model_timeout_seconds = 10
@@ -582,6 +584,12 @@ class TestAIModelTransport:
         assert candidates == ["gemini-2.0-flash", "gemini-2.0-flash-lite-001"]
 
     def test_generate_model_answer_retries_then_uses_fallback_model(self):
+        responses = [
+            None,
+            None,
+            None,
+        ]
+
         class FakeResponse:
             def __init__(self, status_code: int, body: dict[str, object]):
                 self.status_code = status_code
@@ -600,24 +608,24 @@ class TestAIModelTransport:
             def json(self):
                 return self._body
 
+        responses[0] = FakeResponse(429, {})
+        responses[1] = FakeResponse(404, {})
+        responses[2] = FakeResponse(
+            200,
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "Fallback model answer"}]
+                        }
+                    }
+                ]
+            },
+        )
+
         class FakeClient:
             def __init__(self, *args, **kwargs):
-                self.responses = [
-                    FakeResponse(429, {}),
-                    FakeResponse(404, {}),
-                    FakeResponse(
-                        200,
-                        {
-                            "candidates": [
-                                {
-                                    "content": {
-                                        "parts": [{"text": "Fallback model answer"}]
-                                    }
-                                }
-                            ]
-                        },
-                    ),
-                ]
+                pass
 
             async def __aenter__(self):
                 return self
@@ -626,7 +634,7 @@ class TestAIModelTransport:
                 return False
 
             async def post(self, *args, **kwargs):
-                return self.responses.pop(0)
+                return responses.pop(0)
 
         with (
             patch("app.modules.ai.service.httpx.AsyncClient", FakeClient),
@@ -634,7 +642,9 @@ class TestAIModelTransport:
             patch("app.modules.ai.service._sleep_before_retry", new_callable=AsyncMock),
         ):
             settings_mock.return_value.gemini_api_key = "test-key"
-            settings_mock.return_value.gemma_model_id = "gemini-2.0-flash"
+            settings_mock.return_value.ai_primary_model_id = "gemini-2.0-flash"
+            settings_mock.return_value.ai_default_model_id = "gemini-2.0-flash"
+            settings_mock.return_value.ai_reasoning_model_id = "gemini-2.0-pro"
             settings_mock.return_value.gemini_model_fallbacks = ["gemini-2.0-flash-lite-001"]
             settings_mock.return_value.gemini_generation_retries = 1
             settings_mock.return_value.gemini_model_timeout_seconds = 10

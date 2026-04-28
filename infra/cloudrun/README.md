@@ -41,7 +41,7 @@ Important variables:
 - `FIRESTORE_PROJECT_ID`
 - `BIGQUERY_PROJECT_ID`
 - `GEMINI_API_KEY`
-- `GEMMA_MODEL_ID=gemini-2.0-flash`
+- `AI_PRIMARY_MODEL_ID=gemini-2.0-flash`
 - `GEMINI_EMBEDDING_MODEL=gemini-embedding-001`
 
 ## 3. Frontend Environment

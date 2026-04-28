@@ -236,6 +236,7 @@ def _query_contains_phrase(query: str, phrases: tuple[str, ...]) -> bool:
 
 
 IntentName = Literal[
+    "business_summary",
     "product_lookup",
     "sales_kpi",
     "inventory_risk",
@@ -249,6 +250,9 @@ IntentName = Literal[
 
 def _detect_intent(query: str) -> IntentName:
     lowered = query.lower()
+
+    if _query_is_business_summary(query):
+        return "business_summary"
 
     if _query_contains_phrase(
         lowered,
@@ -499,6 +503,47 @@ def _build_sales_answer(query: str, analytics_context: dict[str, Any]) -> Option
         parts.append(f"{low_stock_count} products are already low on stock, so protect availability on your fast movers.")
     else:
         parts.append("Inventory coverage looks cleaner, so the next step is to maintain momentum on the current top seller.")
+    return " ".join(parts)
+
+
+def _build_business_summary_answer(
+    query: str,
+    analytics_context: dict[str, Any],
+    alerts: list[dict[str, Any]],
+    inventory: list[dict[str, Any]],
+) -> Optional[str]:
+    if not _query_is_business_summary(query):
+        return None
+
+    summary = analytics_context.get("dashboard_summary") or {}
+    if not summary:
+        return None
+
+    today_sales = _safe_float(summary.get("today_sales"))
+    today_transactions = _safe_int(summary.get("today_transactions"))
+    top_product = str(summary.get("top_selling_product") or "").strip()
+    active_alert_count = _safe_int(summary.get("active_alert_count"))
+    low_stock_count = _safe_int(summary.get("low_stock_count"))
+
+    if active_alert_count <= 0:
+        active_alert_count = sum(1 for alert in alerts if str(alert.get("status", "")).upper() == "ACTIVE")
+    if low_stock_count <= 0:
+        low_stock_count = sum(
+            1
+            for product in inventory
+            if _safe_int(product.get("reorder_threshold")) > 0
+            and _safe_int(product.get("quantity_on_hand")) <= _safe_int(product.get("reorder_threshold"))
+        )
+
+    parts = [f"Your store has {today_sales:.0f} in sales across {today_transactions} transactions today."]
+    if top_product and top_product.lower() != "unknown":
+        parts.append(f"{top_product} is the current top-selling product.")
+    if active_alert_count > 0:
+        parts.append(f"There are {active_alert_count} active alerts that need attention.")
+    elif low_stock_count > 0:
+        parts.append(f"{low_stock_count} products are low on stock, so inventory needs a quick review.")
+    else:
+        parts.append("Operations look stable right now with no urgent stock or alert pressure in the current snapshot.")
     return " ".join(parts)
 
 
@@ -795,6 +840,7 @@ def _build_operator_answer_result(
     transactions: list[dict[str, Any]],
 ) -> tuple[Optional[str], bool]:
     builders: tuple[tuple[Any, bool], ...] = (
+        (lambda q, i: _build_business_summary_answer(q, analytics_context, alerts, inventory), True),
         (lambda q, i: _build_top_selling_product_answer(q, analytics_context), True),
         (lambda q, i: _build_reorder_recommendation_answer(q, inventory, analytics_context), True),
         (_build_recent_product_answer, False),
@@ -1161,16 +1207,22 @@ async def _generate_model_answer(
     }
 
     timeout_seconds = max(float(settings.gemini_model_timeout_seconds), 1.0)
-    primary_model = (preferred_model or "").strip() or settings.ai_default_model_id or settings.gemma_model_id
+    primary_model = (preferred_model or "").strip() or settings.ai_default_model_id or settings.ai_primary_model_id
     fallback_candidates = fallback_models if fallback_models is not None else settings.gemini_model_fallbacks
     model_candidates = _generation_model_candidates(primary_model, fallback_candidates)
     max_retries = max(int(settings.gemini_generation_retries), 0)
     last_error: Exception | None = None
 
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-        for model in model_candidates:
+    for model in model_candidates:
+        model_timeout_seconds = timeout_seconds
+        model_retries = max_retries
+        if model == settings.ai_reasoning_model_id:
+            model_timeout_seconds = min(timeout_seconds, 18.0)
+            model_retries = 0
+
+        async with httpx.AsyncClient(timeout=model_timeout_seconds) as client:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            for attempt in range(max_retries + 1):
+            for attempt in range(model_retries + 1):
                 try:
                     response = await client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
@@ -1185,24 +1237,29 @@ async def _generate_model_answer(
                             extra={"model": model, "status_code": status_code},
                         )
                         break
-                    if _should_retry_model_error(exc) and attempt < max_retries:
+                    if _should_retry_model_error(exc) and attempt < model_retries:
                         await _sleep_before_retry(attempt, model=model, reason=f"http_{status_code}")
                         continue
                     logger.warning(
                         "Hosted model request failed",
                         exc_info=exc,
-                        extra={"model": model, "status_code": status_code, "attempt": attempt + 1},
+                        extra={
+                            "model": model,
+                            "status_code": status_code,
+                            "attempt": attempt + 1,
+                            "timeout_seconds": model_timeout_seconds,
+                        },
                     )
                     break
                 except Exception as exc:
                     last_error = exc
-                    if _should_retry_model_error(exc) and attempt < max_retries:
+                    if _should_retry_model_error(exc) and attempt < model_retries:
                         await _sleep_before_retry(attempt, model=model, reason=exc.__class__.__name__)
                         continue
                     logger.warning(
                         "Hosted model request failed",
                         exc_info=exc,
-                        extra={"model": model, "attempt": attempt + 1},
+                        extra={"model": model, "attempt": attempt + 1, "timeout_seconds": model_timeout_seconds},
                     )
                     break
 
@@ -1319,20 +1376,59 @@ def _get_related_product_ids(alerts: list[dict[str, Any]]) -> list[str]:
 
 
 def _query_requests_deeper_reasoning(query: str) -> bool:
-    phrases = (
-        "why",
-        "how",
+    lowered = query.lower()
+    if _query_is_business_summary(query):
+        return False
+
+    phrase_triggers = (
         "compare",
         "trend",
         "forecast",
         "predict",
         "recommend strategy",
         "what should i do next",
-        "explain",
         "root cause",
+        "why did",
+        "why is",
+        "why are",
+        "how can i",
+        "how should i",
     )
-    lowered = query.lower()
-    return any(phrase in lowered for phrase in phrases)
+    if any(phrase in lowered for phrase in phrase_triggers):
+        return True
+
+    return bool(re.search(r"\b(why|explain)\b", lowered))
+
+
+def _query_is_business_summary(query: str) -> bool:
+    return _query_contains_phrase(
+        query,
+        (
+            "how is my business",
+            "how's my business",
+            "hows my business",
+            "how is the business",
+            "how's the business",
+            "hows the business",
+            "how is store doing",
+            "how's store doing",
+            "hows store doing",
+            "how is my store doing",
+            "how's my store doing",
+            "hows my store doing",
+            "hows going my business",
+            "how is business going",
+            "how's business going",
+            "how is my shop doing",
+            "business summary",
+            "store summary",
+            "overall summary",
+            "summarize my business",
+            "summarize store",
+            "summarize my store",
+            "give me a summary of my business",
+        ),
+    )
 
 
 def _should_use_operator_answer_directly(query: str, operator_answer: Optional[str]) -> bool:
@@ -1442,7 +1538,7 @@ def _select_model(
         or (intent == "product_lookup" and retrieval_confidence < 0.45)
     )
     if reasoning_needed:
-        selected = settings.ai_reasoning_model_id or settings.ai_default_model_id or settings.gemma_model_id
+        selected = settings.ai_reasoning_model_id or settings.ai_default_model_id or settings.ai_primary_model_id
         fallback_models = [
             model
             for model in [
@@ -1455,7 +1551,7 @@ def _select_model(
         ]
         return selected, list(dict.fromkeys(fallback_models)), 520
 
-    selected = settings.ai_fast_model_id or settings.ai_default_model_id or settings.gemma_model_id
+    selected = settings.ai_fast_model_id or settings.ai_default_model_id or settings.ai_primary_model_id
     fallback_models = [
         model
         for model in [
@@ -1490,6 +1586,9 @@ def _build_retrieval_only_answer(
     matched_products: list[dict[str, Any]],
     retrieval_confidence: float,
 ) -> Optional[str]:
+    if intent == "business_summary":
+        return _build_business_summary_answer(query, analytics_context, alerts, matched_products)
+
     if intent == "sales_kpi":
         return _build_top_selling_product_answer(query, analytics_context) or _build_sales_answer(query, analytics_context)
 
@@ -1859,7 +1958,7 @@ class AIService:
         )
         used_fallback = False
 
-        if direct_answer and intent in {"sales_kpi", "inventory_risk"} and not _query_requests_deeper_reasoning(query):
+        if direct_answer and intent in {"business_summary", "sales_kpi", "inventory_risk"} and not _query_requests_deeper_reasoning(query):
             raw_answer = direct_answer
             answer_mode = "retrieval_only"
         elif direct_answer and intent in {"product_lookup", "reorder_decision"} and retrieval_confidence >= 0.72:
