@@ -114,6 +114,69 @@ class AnalyticsService:
         response["summary"] = summary
         return response
 
+    async def get_live_dashboard_summary(self, store_id: str) -> Dict[str, Any]:
+        """
+        Return operational dashboard cards from live Firestore state.
+
+        This endpoint is intentionally independent from the analytics mart so
+        cashier and inventory actions are reflected immediately in the UI.
+        """
+        summary = await self.repo.get_live_dashboard_summary(store_id)
+        return {
+            "analytics_last_updated_at": self._utcnow().isoformat(),
+            "freshness_status": "fresh",
+            "summary": summary,
+        }
+
+    async def get_live_sales_trends(
+        self,
+        store_id: str,
+        range_value: str = "30d",
+        granularity: str = "daily",
+    ) -> Dict[str, Any]:
+        allowed_ranges = {"7d": 7, "30d": 30, "90d": 90}
+        allowed_granularities = {"daily", "weekly"}
+        if range_value not in allowed_ranges:
+            raise InvalidAnalyticsQueryError(
+                "Invalid `range` value.",
+                details={"range": range_value, "allowed": sorted(allowed_ranges.keys())},
+            )
+        if granularity not in allowed_granularities:
+            raise InvalidAnalyticsQueryError(
+                "Invalid `granularity` value.",
+                details={
+                    "granularity": granularity,
+                    "allowed": sorted(allowed_granularities),
+                },
+            )
+
+        points = await self.repo.get_live_sales_trends(
+            store_id=store_id,
+            range_days=allowed_ranges[range_value],
+            granularity=granularity,
+        )
+        return {
+            "analytics_last_updated_at": self._utcnow().isoformat(),
+            "freshness_status": "fresh",
+            "points": points,
+        }
+
+    async def get_live_product_performance(self, store_id: str) -> Dict[str, Any]:
+        items = await self.repo.get_live_product_performance(store_id)
+        return {
+            "analytics_last_updated_at": self._utcnow().isoformat(),
+            "freshness_status": "fresh",
+            "items": items,
+        }
+
+    async def get_live_customer_insights(self, store_id: str) -> Dict[str, Any]:
+        top_customers = await self.repo.get_live_customer_insights(store_id)
+        return {
+            "analytics_last_updated_at": self._utcnow().isoformat(),
+            "freshness_status": "fresh",
+            "top_customers": top_customers,
+        }
+
     async def get_sales_trends(
         self,
         store_id: str,

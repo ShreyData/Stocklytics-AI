@@ -1,35 +1,75 @@
 import asyncio
 import logging
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud import bigquery, firestore
 
 from app.common.config import get_settings
+from app.common.google_clients import (
+    create_bigquery_client,
+    create_firestore_async_client,
+    get_default_gcp_project,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Coerce Firestore values into ints without raising on blanks or bad data."""
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce Firestore values into floats without raising on blanks or bad data."""
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_utc_datetime(value: Any) -> Optional[datetime]:
+    """Normalize Firestore timestamps or datetimes to timezone-aware UTC."""
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class AnalyticsRepository:
     def __init__(self):
         settings = get_settings()
         self.firestore_project_id = settings.firestore_project_id
-        self.bigquery_project_id = settings.bigquery_project_id
+        self.bigquery_project_id = get_default_gcp_project(settings)
         self.dataset_mart = settings.bigquery_dataset_mart
         self.dataset_raw = settings.bigquery_dataset_raw
-        self.project = settings.bigquery_project_id
+        self.project = self.bigquery_project_id
         self._db: Optional[firestore.AsyncClient] = None
         self._bq: Optional[bigquery.Client] = None
 
     @property
     def db(self) -> firestore.AsyncClient:
         if self._db is None:
-            self._db = firestore.AsyncClient(project=self.firestore_project_id or None)
+            self._db = create_firestore_async_client(project=self.firestore_project_id or None)
         return self._db
 
     @property
     def bq(self) -> bigquery.Client:
         if self._bq is None:
-            self._bq = bigquery.Client(project=self.bigquery_project_id or None)
+            self._bq = create_bigquery_client(project=self.bigquery_project_id or None)
         return self._bq
 
     async def get_analytics_metadata(self, store_id: str) -> Optional[Dict[str, Any]]:
@@ -112,6 +152,230 @@ class AnalyticsRepository:
                 "top_selling_product": row.get("top_selling_product"),
             }
         return None
+
+    async def get_live_dashboard_summary(self, store_id: str) -> Dict[str, Any]:
+        """
+        Build an operational dashboard summary directly from Firestore.
+
+        This powers UI cards that should update immediately after inventory and
+        billing writes, without waiting for the analytics pipeline.
+        """
+        now_utc = datetime.now(timezone.utc)
+        start_of_day = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = start_of_day + timedelta(days=1)
+
+        transactions_query = (
+            self.db.collection("transactions")
+            .where("store_id", "==", store_id)
+            .where("sale_timestamp", ">=", start_of_day)
+            .where("sale_timestamp", "<", end_of_day)
+        )
+        active_alerts_query = (
+            self.db.collection("alerts")
+            .where("store_id", "==", store_id)
+            .where("status", "==", "ACTIVE")
+        )
+        low_stock_alerts_query = (
+            self.db.collection("alerts")
+            .where("store_id", "==", store_id)
+            .where("status", "==", "ACTIVE")
+            .where("alert_type", "==", "LOW_STOCK")
+        )
+
+        try:
+            transaction_docs = [doc async for doc in transactions_query.stream()]
+        except FailedPrecondition:
+            logger.warning(
+                "Missing Firestore composite index for live dashboard transactions query; "
+                "falling back to store-only scan.",
+                extra={"store_id": store_id},
+            )
+            fallback_transactions_query = self.db.collection("transactions").where("store_id", "==", store_id)
+            all_transaction_docs = [doc async for doc in fallback_transactions_query.stream()]
+            transaction_docs = []
+            for doc in all_transaction_docs:
+                txn = doc.to_dict() or {}
+                sale_dt = _coerce_utc_datetime(txn.get("sale_timestamp"))
+                if sale_dt is None:
+                    continue
+                if start_of_day <= sale_dt < end_of_day:
+                    transaction_docs.append(doc)
+
+        try:
+            active_alert_docs = [doc async for doc in active_alerts_query.stream()]
+        except FailedPrecondition:
+            logger.warning(
+                "Missing Firestore composite index for live dashboard active alerts query; "
+                "falling back to store-only scan.",
+                extra={"store_id": store_id},
+            )
+            fallback_alerts_query = self.db.collection("alerts").where("store_id", "==", store_id)
+            all_alert_docs = [doc async for doc in fallback_alerts_query.stream()]
+            active_alert_docs = [
+                doc for doc in all_alert_docs if (doc.to_dict() or {}).get("status") == "ACTIVE"
+            ]
+
+        try:
+            low_stock_alert_docs = [doc async for doc in low_stock_alerts_query.stream()]
+        except FailedPrecondition:
+            logger.warning(
+                "Missing Firestore composite index for live dashboard low stock alerts query; "
+                "falling back to active-alert scan.",
+                extra={"store_id": store_id},
+            )
+            low_stock_alert_docs = [
+                doc
+                for doc in active_alert_docs
+                if (doc.to_dict() or {}).get("alert_type") == "LOW_STOCK"
+            ]
+
+        today_sales = 0.0
+        product_units_sold: dict[str, int] = defaultdict(int)
+        product_name_by_id: dict[str, str] = {}
+
+        for doc in transaction_docs:
+            txn = doc.to_dict() or {}
+            today_sales += _safe_float(txn.get("total_amount", 0.0))
+            for item in txn.get("items", []):
+                product_id = item.get("product_id")
+                if not product_id:
+                    continue
+                product_units_sold[product_id] += _safe_int(item.get("quantity", 0))
+                if item.get("product_name"):
+                    product_name_by_id[product_id] = str(item["product_name"])
+
+        top_selling_product: Optional[str] = None
+        if product_units_sold:
+            top_product_id = max(
+                product_units_sold.items(),
+                key=lambda item: (item[1], product_name_by_id.get(item[0], item[0])),
+            )[0]
+            top_selling_product = product_name_by_id.get(top_product_id, top_product_id)
+
+        return {
+            "today_sales": round(today_sales, 2),
+            "today_transactions": len(transaction_docs),
+            "active_alert_count": len(active_alert_docs),
+            "low_stock_count": len(low_stock_alert_docs),
+            "top_selling_product": top_selling_product,
+        }
+
+    async def get_live_sales_trends(
+        self,
+        store_id: str,
+        range_days: int = 30,
+        granularity: str = "daily",
+    ) -> List[Dict[str, Any]]:
+        """
+        Build sales trend points directly from Firestore transactions.
+
+        This keeps analytics responsive immediately after billing writes.
+        """
+        now_utc = datetime.now(timezone.utc)
+        start_boundary = (now_utc - timedelta(days=range_days - 1)).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
+        transactions_query = self.db.collection("transactions").where("store_id", "==", store_id)
+        all_transaction_docs = [doc async for doc in transactions_query.stream()]
+
+        buckets: dict[str, dict[str, Any]] = {}
+        for doc in all_transaction_docs:
+            txn = doc.to_dict() or {}
+            sale_timestamp = txn.get("sale_timestamp")
+            if not isinstance(sale_timestamp, datetime):
+                continue
+
+            sale_dt = sale_timestamp.astimezone(timezone.utc)
+            if sale_dt < start_boundary:
+                continue
+            if granularity == "weekly":
+                week_start = sale_dt.date() - timedelta(days=sale_dt.weekday())
+                label = week_start.isoformat()
+            else:
+                label = sale_dt.date().isoformat()
+
+            bucket = buckets.setdefault(
+                label,
+                {"label": label, "sales_amount": 0.0, "transactions": 0},
+            )
+            bucket["sales_amount"] += _safe_float(txn.get("total_amount", 0.0))
+            bucket["transactions"] += 1
+
+        return [
+            {
+                "label": label,
+                "sales_amount": round(float(bucket["sales_amount"]), 2),
+                "transactions": int(bucket["transactions"]),
+            }
+            for label, bucket in sorted(buckets.items(), key=lambda item: item[0])
+        ]
+
+    async def get_live_product_performance(self, store_id: str) -> List[Dict[str, Any]]:
+        """
+        Build product performance directly from Firestore transactions.
+        """
+        transactions_query = self.db.collection("transactions").where("store_id", "==", store_id)
+        transaction_docs = [doc async for doc in transactions_query.stream()]
+
+        product_totals: dict[str, dict[str, Any]] = {}
+        for doc in transaction_docs:
+            txn = doc.to_dict() or {}
+            for item in txn.get("items", []):
+                product_id = item.get("product_id")
+                if not product_id:
+                    continue
+
+                bucket = product_totals.setdefault(
+                    str(product_id),
+                    {
+                        "product_id": str(product_id),
+                        "product_name": str(item.get("product_name") or product_id),
+                        "quantity_sold": 0,
+                        "revenue": 0.0,
+                    },
+                )
+                bucket["quantity_sold"] += _safe_int(item.get("quantity", 0))
+                bucket["revenue"] += _safe_float(item.get("line_total", 0.0))
+
+        ranked = sorted(
+            product_totals.values(),
+            key=lambda item: (-float(item["revenue"]), item["product_name"]),
+        )
+        return [
+            {
+                "product_id": item["product_id"],
+                "product_name": item["product_name"],
+                "quantity_sold": int(item["quantity_sold"]),
+                "revenue": round(float(item["revenue"]), 2),
+            }
+            for item in ranked[:50]
+        ]
+
+    async def get_live_customer_insights(self, store_id: str) -> List[Dict[str, Any]]:
+        """
+        Read customer rollups directly from Firestore.
+        """
+        customers_query = self.db.collection("customers").where("store_id", "==", store_id)
+        customer_docs = [doc async for doc in customers_query.stream()]
+
+        customers: list[dict[str, Any]] = []
+        for doc in customer_docs:
+            customer = doc.to_dict() or {}
+            customers.append(
+                {
+                    "customer_id": str(customer.get("customer_id") or doc.id),
+                    "name": str(customer.get("name") or "Unknown"),
+                    "lifetime_spend": round(_safe_float(customer.get("total_spend", 0.0)), 2),
+                    "visit_count": _safe_int(customer.get("visit_count", 0)),
+                }
+            )
+
+        customers.sort(key=lambda item: (-float(item["lifetime_spend"]), item["name"]))
+        return customers[:10]
 
     async def get_sales_trends(
         self,

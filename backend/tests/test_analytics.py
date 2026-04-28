@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.modules.analytics.repository import _safe_float, _safe_int
 from app.modules.analytics.service import AnalyticsService
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -34,6 +35,27 @@ MOCK_DASHBOARD_SUMMARY = {
 
 
 class TestAnalyticsAPI:
+    def test_live_dashboard_success(self):
+        live_summary = {
+            "today_sales": 568.0,
+            "today_transactions": 2,
+            "active_alert_count": 1,
+            "low_stock_count": 3,
+            "top_selling_product": "Amul Gold 500ml",
+        }
+        with patch(
+            "app.modules.analytics.repository.AnalyticsRepository.get_live_dashboard_summary",
+            new_callable=AsyncMock,
+            return_value=live_summary,
+        ):
+            response = client.get("/api/v1/analytics/dashboard/live", headers=AUTH_HEADER)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "request_id" in body
+        assert body["freshness_status"] == "fresh"
+        assert body["summary"] == live_summary
+
     def test_dashboard_success(self):
         with (
             patch("app.modules.analytics.repository.AnalyticsRepository.get_analytics_metadata", new_callable=AsyncMock, return_value=MOCK_METADATA),
@@ -170,3 +192,31 @@ class TestAnalyticsAPI:
         assert response.status_code == 200
         body = response.json()
         assert body["freshness_status"] == "stale"
+
+
+class TestAnalyticsRepositoryCoercion:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, 0),
+            ("", 0),
+            ("7", 7),
+            ("7.9", 7),
+            ("bad", 0),
+        ],
+    )
+    def test_safe_int_handles_loose_firestore_values(self, value, expected):
+        assert _safe_int(value) == expected
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, 0.0),
+            ("", 0.0),
+            ("12.5", 12.5),
+            (9, 9.0),
+            ("bad", 0.0),
+        ],
+    )
+    def test_safe_float_handles_loose_firestore_values(self, value, expected):
+        assert _safe_float(value) == expected

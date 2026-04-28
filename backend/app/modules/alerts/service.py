@@ -47,6 +47,40 @@ class InvalidAlertTransitionError(ConflictError):
     error_code = "INVALID_ALERT_TRANSITION"
 
 
+async def _reconcile_inventory_backed_alerts(store_id: str) -> None:
+    """
+    Backfill product-driven alerts from the current inventory state.
+
+    This keeps the alerts collection aligned with the operational dashboard when
+    alert hooks were missed earlier or the alerts collection was empty.
+    """
+    from app.modules.alerts.engine import evaluate_expiry_soon, evaluate_low_stock
+
+    products = await repository.list_products_for_store(store_id)
+    for product in products:
+        if product.get("status") == "INACTIVE":
+            continue
+
+        product_id = str(product.get("product_id") or "")
+        if not product_id:
+            continue
+
+        await evaluate_low_stock(
+            store_id=store_id,
+            product_id=product_id,
+            product_name=str(product.get("name") or "Unknown Product"),
+            current_stock=int(product.get("quantity_on_hand", 0)),
+            reorder_threshold=int(product.get("reorder_threshold", 0)),
+        )
+        await evaluate_expiry_soon(
+            store_id=store_id,
+            product_id=product_id,
+            product_name=str(product.get("name") or "Unknown Product"),
+            expiry_date=product.get("expiry_date"),
+            current_stock=int(product.get("quantity_on_hand", 0)),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Serialisation helper
 # ---------------------------------------------------------------------------
@@ -142,6 +176,16 @@ async def list_alerts(
         alert_type=alert_type,
         severity=severity,
     )
+
+    if not alerts:
+        await _reconcile_inventory_backed_alerts(store_id)
+        alerts = await repository.list_alerts(
+            store_id=store_id,
+            status=status,
+            alert_type=alert_type,
+            severity=severity,
+        )
+
     return [_to_alert_list_item(_firestore_to_response(alert)) for alert in alerts]
 
 
@@ -155,6 +199,10 @@ async def get_alerts_summary(store_id: str) -> dict[str, Any]:
     `resolved_today` counts alerts resolved on the current UTC calendar day.
     """
     all_alerts = await repository.list_alerts(store_id=store_id)
+
+    if not all_alerts:
+        await _reconcile_inventory_backed_alerts(store_id)
+        all_alerts = await repository.list_alerts(store_id=store_id)
 
     today_utc = datetime.now(timezone.utc).date()
     active = 0

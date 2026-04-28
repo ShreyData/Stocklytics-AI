@@ -19,6 +19,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import DocumentSnapshot
 
 from app.common.config import get_settings
+from app.common.google_clients import create_firestore_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def _get_db() -> firestore.AsyncClient:
     if _db is None:
         settings = get_settings()
         project = settings.firestore_project_id or None
-        _db = firestore.AsyncClient(project=project)
+        _db = create_firestore_async_client(project=project)
     return _db
 
 
@@ -69,19 +70,15 @@ async def get_alert_by_condition(store_id: str, condition_key: str) -> Optional[
     Returns None if no open alert exists.
     """
     from app.modules.alerts.schemas import ALERT_STATUS_RESOLVED
+
     db = _get_db()
-    query = (
-        db.collection(ALERTS_COLLECTION)
-        .where("store_id", "==", store_id)
-        .where("condition_key", "==", condition_key)
-        .where("status", "!=", ALERT_STATUS_RESOLVED)
-        .limit(1)
-    )
-    
-    docs = [doc async for doc in query.stream()]
-    if not docs:
-        return None
-    return _snapshot_to_dict(docs[0])
+    query = db.collection(ALERTS_COLLECTION).where("store_id", "==", store_id)
+
+    async for doc in query.stream():
+        data = _snapshot_to_dict(doc)
+        if data.get("condition_key") == condition_key and data.get("status") != ALERT_STATUS_RESOLVED:
+            return data
+    return None
 
 
 async def list_alerts(
@@ -102,16 +99,16 @@ async def list_alerts(
     db = _get_db()
     query = db.collection(ALERTS_COLLECTION).where("store_id", "==", store_id)
 
-    if status is not None:
-        query = query.where("status", "==", status)
-    if alert_type is not None:
-        query = query.where("alert_type", "==", alert_type)
-    if severity is not None:
-        query = query.where("severity", "==", severity)
-
     results: list[dict[str, Any]] = []
     async for doc in query.stream():
-        results.append(_snapshot_to_dict(doc))
+        data = _snapshot_to_dict(doc)
+        if status is not None and data.get("status") != status:
+            continue
+        if alert_type is not None and data.get("alert_type") != alert_type:
+            continue
+        if severity is not None and data.get("severity") != severity:
+            continue
+        results.append(data)
     return results
 
 
@@ -196,17 +193,17 @@ async def list_transactions_in_window(
     Return transactions for a store inside [start_at, end_at] by sale_timestamp.
     """
     db = _get_db()
-    query = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("store_id", "==", store_id)
-        .where("sale_timestamp", ">=", start_at)
-        .where("sale_timestamp", "<=", end_at)
-    )
+    query = db.collection(TRANSACTIONS_COLLECTION).where("store_id", "==", store_id)
 
     results: list[dict[str, Any]] = []
     async for doc in query.stream():
         data = doc.to_dict() or {}
         data.setdefault("transaction_id", doc.id)
+        sale_timestamp = data.get("sale_timestamp")
+        if not isinstance(sale_timestamp, datetime):
+            continue
+        if sale_timestamp < start_at or sale_timestamp > end_at:
+            continue
         results.append(data)
     return results
 

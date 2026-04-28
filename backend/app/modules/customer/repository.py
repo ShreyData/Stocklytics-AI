@@ -5,6 +5,7 @@ from typing import Any
 from google.cloud import firestore
 
 from app.common.config import get_settings
+from app.common.google_clients import create_firestore_async_client
 
 
 class CustomerRepository:
@@ -17,7 +18,7 @@ class CustomerRepository:
     def _get_db(self) -> firestore.AsyncClient:
         if self._db is None:
             project = self._settings.firestore_project_id or None
-            self._db = firestore.AsyncClient(project=project)
+            self._db = create_firestore_async_client(project=project)
         return self._db
 
     async def get_customer_by_id(self, customer_id: str) -> dict[str, Any] | None:
@@ -67,17 +68,14 @@ class CustomerRepository:
     async def list_customers(self, store_id: str) -> list[dict[str, Any]]:
         """List customers scoped to a store."""
         db = self._get_db()
-        query = (
-            db.collection("customers")
-            .where("store_id", "==", store_id)
-            .order_by("created_at", direction=firestore.Query.DESCENDING)
-        )
+        query = db.collection("customers").where("store_id", "==", store_id)
         docs = await query.get()
         results: list[dict[str, Any]] = []
         for doc in docs:
             data = doc.to_dict() or {}
             data["customer_id"] = doc.id
             results.append(data)
+        results.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
         return results
 
     async def get_purchase_history(
@@ -91,7 +89,6 @@ class CustomerRepository:
             db.collection("transactions")
             .where("store_id", "==", store_id)
             .where("customer_id", "==", customer_id)
-            .order_by("sale_timestamp", direction=firestore.Query.DESCENDING)
         )
         docs = await query.get()
         results: list[dict[str, Any]] = []
@@ -103,4 +100,5 @@ class CustomerRepository:
                 "sale_timestamp": data.get("sale_timestamp"),
             }
             results.append(mapped_data)
+        results.sort(key=lambda item: item.get("sale_timestamp") or 0, reverse=True)
         return results

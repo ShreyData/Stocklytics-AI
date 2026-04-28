@@ -10,4 +10,6 @@ Modular monolith backend with a lightweight frontend for small retail stores.
 - `scripts/` Local tooling and helpers
 
 ## Notes
-- Planning docs live in the Plan folder and are ignored by Git.
+- Planning docs live in the `Plan/` folder and are ignored by Git.
+- Cloud Run deployment templates live in `infra/cloudrun/`.
+- Local secret files such as `.env`, `.env.local`, and Cloud Run env yaml files are intentionally ignored.

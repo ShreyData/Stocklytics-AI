@@ -25,6 +25,11 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import DocumentSnapshot
 
 from app.common.config import get_settings
+from app.common.google_clients import (
+    create_bigquery_client,
+    create_firestore_async_client,
+    get_default_gcp_project,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +48,7 @@ def _get_db() -> firestore.AsyncClient:
     if _db is None:
         settings = get_settings()
         project = settings.firestore_project_id or None
-        _db = firestore.AsyncClient(project=project)
+        _db = create_firestore_async_client(project=project)
     return _db
 
 
@@ -52,8 +57,8 @@ def _get_bq() -> bigquery.Client:
     global _bq
     if _bq is None:
         settings = get_settings()
-        project = settings.bigquery_project_id or None
-        _bq = bigquery.Client(project=project)
+        project = get_default_gcp_project(settings)
+        _bq = create_bigquery_client(project=project)
     return _bq
 
 
@@ -66,6 +71,8 @@ MESSAGES_SUBCOLLECTION = "messages"
 ANALYTICS_METADATA_COLLECTION = "analytics_metadata"
 ALERTS_COLLECTION = "alerts"
 PRODUCTS_COLLECTION = "products"
+CUSTOMERS_COLLECTION = "customers"
+TRANSACTIONS_COLLECTION = "transactions"
 
 
 # ---------------------------------------------------------------------------
@@ -96,18 +103,16 @@ async def get_active_alerts_snapshot(store_id: str, limit: int = 10) -> list[dic
     Reads directly from the alerts collection (owned by Alerts module).
     """
     db = _get_db()
-    query = (
-        db.collection(ALERTS_COLLECTION)
-        .where("store_id", "==", store_id)
-        .where("status", "==", "ACTIVE")
-        .limit(limit)
-    )
+    query = db.collection(ALERTS_COLLECTION).where("store_id", "==", store_id)
     results: list[dict[str, Any]] = []
     async for doc in query.stream():
         data: dict[str, Any] = doc.to_dict() or {}
         if "alert_id" not in data:
             data["alert_id"] = doc.id
-        results.append(data)
+        if data.get("status") == "ACTIVE":
+            results.append(data)
+        if len(results) >= limit:
+            break
     return results
 
 
@@ -124,18 +129,16 @@ async def get_relevant_alerts_snapshot(store_id: str, limit: int = 10) -> list[d
         return active_alerts
 
     db = _get_db()
-    acknowledged_query = (
-        db.collection(ALERTS_COLLECTION)
-        .where("store_id", "==", store_id)
-        .where("status", "==", "ACKNOWLEDGED")
-        .limit(limit - len(active_alerts))
-    )
+    acknowledged_query = db.collection(ALERTS_COLLECTION).where("store_id", "==", store_id)
     acknowledged_alerts: list[dict[str, Any]] = []
     async for doc in acknowledged_query.stream():
         data: dict[str, Any] = doc.to_dict() or {}
         if "alert_id" not in data:
             data["alert_id"] = doc.id
-        acknowledged_alerts.append(data)
+        if data.get("status") == "ACKNOWLEDGED":
+            acknowledged_alerts.append(data)
+        if len(acknowledged_alerts) >= limit - len(active_alerts):
+            break
 
     return active_alerts + acknowledged_alerts
 
@@ -183,6 +186,143 @@ async def get_inventory_snapshot(
 
     ordered = focused + fallback
     return ordered[:limit]
+
+
+async def get_customer_snapshot(
+    store_id: str,
+    limit: int = 10,
+    query_text: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Return up to `limit` customers for the store to ground customer-focused answers.
+    Reads directly from the customers collection.
+    """
+    db = _get_db()
+    fetch_limit = max(limit * 5, 25)
+    query = (
+        db.collection(CUSTOMERS_COLLECTION)
+        .where("store_id", "==", store_id)
+        .limit(fetch_limit)
+    )
+    results: list[dict[str, Any]] = []
+    async for doc in query.stream():
+        data: dict[str, Any] = doc.to_dict() or {}
+        if "customer_id" not in data:
+            data["customer_id"] = doc.id
+        results.append(data)
+
+    query_tokens = {
+        token
+        for token in _normalise_query_tokens(query_text or "")
+        if len(token) >= 3
+    }
+
+    focused: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    for item in results:
+        haystacks = (
+            str(item.get("customer_id", "")).lower(),
+            str(item.get("name", "")).lower(),
+            str(item.get("phone", "")).lower(),
+        )
+        if any(token in haystack for token in query_tokens for haystack in haystacks):
+            focused.append(item)
+        else:
+            fallback.append(item)
+
+    fallback.sort(
+        key=lambda item: (
+            float(item.get("total_spend", 0) or 0),
+            int(item.get("visit_count", 0) or 0),
+        ),
+        reverse=True,
+    )
+    ordered = focused + fallback
+    return ordered[:limit]
+
+
+async def get_recent_transactions_snapshot(
+    store_id: str,
+    limit: int = 10,
+    query_text: Optional[str] = None,
+    customer_ids: Optional[list[str]] = None,
+    product_ids: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
+    """
+    Return recent transactions for the store to ground billing and customer questions.
+    Reads directly from the transactions collection.
+    """
+    db = _get_db()
+    fetch_limit = max(limit * 5, 25)
+    query = (
+        db.collection(TRANSACTIONS_COLLECTION)
+        .where("store_id", "==", store_id)
+        .limit(fetch_limit)
+    )
+    results: list[dict[str, Any]] = []
+    async for doc in query.stream():
+        data: dict[str, Any] = doc.to_dict() or {}
+        data.setdefault("transaction_id", doc.id)
+        results.append(data)
+
+    query_tokens = {
+        token
+        for token in _normalise_query_tokens(query_text or "")
+        if len(token) >= 3
+    }
+    wanted_customer_ids = set(customer_ids or [])
+    wanted_product_ids = set(product_ids or [])
+
+    focused: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    for item in results:
+        item_customer_id = str(item.get("customer_id", ""))
+        item_transaction_id = str(item.get("transaction_id", ""))
+        items = item.get("items") or []
+        item_product_ids = {
+            str(line.get("product_id", ""))
+            for line in items
+            if line.get("product_id")
+        }
+        matches = (
+            item_customer_id in wanted_customer_ids
+            or bool(item_product_ids & wanted_product_ids)
+            or any(
+                token in item_transaction_id.lower() or token in item_customer_id.lower()
+                for token in query_tokens
+            )
+        )
+        if matches:
+            focused.append(item)
+        else:
+            fallback.append(item)
+
+    ordered = focused + sorted(
+        fallback,
+        key=lambda item: item.get("sale_timestamp") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+    compact: list[dict[str, Any]] = []
+    for item in ordered[:limit]:
+        compact.append(
+            {
+                "transaction_id": item.get("transaction_id"),
+                "customer_id": item.get("customer_id"),
+                "payment_method": item.get("payment_method"),
+                "total_amount": item.get("total_amount"),
+                "sale_timestamp": item.get("sale_timestamp"),
+                "items": [
+                    {
+                        "product_id": line.get("product_id"),
+                        "quantity": line.get("quantity"),
+                        "line_total": line.get("line_total"),
+                    }
+                    for line in (item.get("items") or [])[:5]
+                ],
+            }
+        )
+    return _normalise_timestamps_on_list(compact)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +478,65 @@ async def get_analytics_context(
     }
 
 
+async def vector_search_products(
+    store_id: str,
+    query_embedding: list[float],
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """
+    Retrieve the top-K semantically relevant products for a query using BigQuery VECTOR_SEARCH.
+
+    The embedding values are inlined into the SQL literal because BigQuery does not
+    support parameterized ARRAY<FLOAT64> in the VECTOR_SEARCH sub-select context.
+    Float values from our own embedding model carry no injection risk.
+
+    Returns an empty list on any failure — the caller handles degraded context gracefully.
+
+    We intentionally force brute-force mode here so RAG still works before a
+    dedicated BigQuery vector index has been created in production.
+    """
+    settings = get_settings()
+    project = settings.bigquery_project_id
+    mart = settings.bigquery_dataset_mart
+    if not project or not query_embedding:
+        return []
+
+    bq = _get_bq()
+    # Inline float literals for VECTOR_SEARCH compatibility
+    vector_literal = ", ".join(repr(float(v)) for v in query_embedding)
+
+    sql = f"""
+        SELECT
+            base.product_id,
+            base.product_name,
+            base.category,
+            base.embedding_text,
+            distance
+        FROM VECTOR_SEARCH(
+            (
+                SELECT product_id, product_name, category, embedding_text, embedding
+                FROM `{project}.{mart}.product_embeddings`
+                WHERE store_id = '{store_id}'
+            ),
+            'embedding',
+            (SELECT [{vector_literal}] AS embedding),
+            top_k => {int(top_k)},
+            distance_type => 'COSINE',
+            options => '{{"use_brute_force": true}}'
+        )
+        ORDER BY distance ASC
+    """
+    try:
+        return await _run_bigquery(bq, sql, [])
+    except Exception as exc:
+        logger.warning(
+            "VECTOR_SEARCH query failed; returning empty RAG results",
+            exc_info=exc,
+            extra={"store_id": store_id},
+        )
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Chat session persistence
 # ---------------------------------------------------------------------------
@@ -459,6 +658,10 @@ def _normalise_timestamps(data: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def _normalise_timestamps_on_list(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_normalise_timestamps(item) for item in items]
 
 
 async def _run_bigquery(

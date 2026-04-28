@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from google.cloud import bigquery, firestore  # type: ignore
 
 from app.modules.data_pipeline import mart_transform, repository
+from app.modules.data_pipeline.embedding_sync import sync_product_embeddings
 from app.modules.data_pipeline.failure_handler import run_with_retry
 from app.modules.data_pipeline.schemas import (
     PIPELINE_RUN_TYPE_MART_REFRESH,
@@ -125,6 +126,30 @@ async def run_mart_refresh(
             "Transform runner completed successfully",
             extra={"pipeline_run_id": pipeline_run_id, "store_id": store_id},
         )
+
+        # ── Embedding sync (non-blocking: failure never fails the pipeline run) ──
+        try:
+            products: list[dict] = []
+            async for doc in db.collection("products").where("store_id", "==", store_id).stream():
+                data = doc.to_dict() or {}
+                data.setdefault("product_id", doc.id)
+                products.append(data)
+            embedded_count = await sync_product_embeddings(
+                bq,
+                store_id=store_id,
+                products=products,
+                analytics_last_updated_at=analytics_ts,
+            )
+            logger.info(
+                "Embedding sync complete",
+                extra={"store_id": store_id, "embedded": embedded_count},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Embedding sync failed; mart transforms remain SUCCEEDED",
+                exc_info=exc,
+                extra={"store_id": store_id},
+            )
     else:
         # Existing mart rows remain; analytics_last_updated_at is NOT updated.
         await repository.mark_pipeline_run_failed(

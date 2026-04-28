@@ -14,10 +14,20 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+*.log
+
+# Next.js
+.next/
+*.tsbuildinfo
 
 # Env
 .env
 .env.*
+!.env.example
+!*.env.yaml.example
+
+# Cloud Run local deploy configs
+infra/cloudrun/*.env.yaml
 
 # OS
 .DS_Store
@@ -29,3 +39,5 @@ build/
 coverage/
 
 .codex
+auth-id-keys.txt
+backend/set_firebase_claims.local.py

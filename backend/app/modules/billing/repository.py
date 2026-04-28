@@ -6,6 +6,7 @@ Isolates Firestore access for the billing domain.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Optional
@@ -14,6 +15,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import DocumentSnapshot
 
 from app.common.config import get_settings
+from app.common.google_clients import create_firestore_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,7 @@ def _get_db() -> firestore.AsyncClient:
     if _db is None:
         settings = get_settings()
         project = settings.firestore_project_id or None
-        _db = firestore.AsyncClient(project=project)
+        _db = create_firestore_async_client(project=project)
     return _db
 
 
@@ -97,7 +99,7 @@ async def get_products_by_ids(product_ids: list[str]) -> dict[str, dict[str, Any
     """Batch-fetch product documents by ID."""
     db = _get_db()
     refs = [db.collection(COL_PRODUCTS).document(product_id) for product_id in product_ids]
-    snapshots: list[DocumentSnapshot] = await db.get_all(refs)  # type: ignore[attr-defined]
+    snapshots = await asyncio.gather(*(ref.get() for ref in refs))
 
     result: dict[str, dict[str, Any]] = {}
     for snapshot in snapshots:
@@ -171,103 +173,91 @@ async def create_billing_transaction(
     - billing_idempotency document
     """
     db = _get_db()
-    transaction = db.transaction()
     transaction_ref = db.collection(COL_TRANSACTIONS).document(transaction_id)
     idempotency_ref = db.collection(COL_IDEMPOTENCY).document(idempotency_doc_id)
+    inventory_updates: list[dict[str, Any]] = []
 
-    @firestore.async_transactional
-    async def _apply(txn: firestore.AsyncTransaction) -> dict[str, Any]:
-        inventory_updates: list[dict[str, Any]] = []
+    for deduction in inventory_deductions:
+        product_id = deduction["product_id"]
+        quantity_delta = int(deduction["quantity_delta"])
+        product_ref = db.collection(COL_PRODUCTS).document(product_id)
+        snapshot: DocumentSnapshot = await product_ref.get()
 
-        for deduction in inventory_deductions:
-            product_id = deduction["product_id"]
-            quantity_delta = int(deduction["quantity_delta"])
-            product_ref = db.collection(COL_PRODUCTS).document(product_id)
-            snapshot: DocumentSnapshot = await product_ref.get(transaction=txn)
+        if not snapshot.exists:
+            raise BillingCommitProductNotFoundError(product_id)
 
-            if not snapshot.exists:
-                raise BillingCommitProductNotFoundError(product_id)
+        product = snapshot.to_dict() or {}
+        if product.get("store_id") != store_id:
+            raise BillingCommitProductNotFoundError(product_id)
 
-            product = snapshot.to_dict() or {}
-            if product.get("store_id") != store_id:
-                raise BillingCommitProductNotFoundError(product_id)
-
-            available_quantity = int(product.get("quantity_on_hand", 0))
-            if quantity_delta > available_quantity:
-                raise BillingCommitInsufficientStockError(
-                    product_id=product_id,
-                    requested_quantity=quantity_delta,
-                    available_quantity=available_quantity,
-                )
-
-            new_quantity = available_quantity - quantity_delta
-            txn.update(
-                product_ref,
-                {
-                    "quantity_on_hand": new_quantity,
-                    "updated_at": created_at,
-                },
-            )
-            inventory_updates.append(
-                {
-                    "product_id": product_id,
-                    "new_quantity_on_hand": new_quantity,
-                }
+        available_quantity = int(product.get("quantity_on_hand", 0))
+        if quantity_delta > available_quantity:
+            raise BillingCommitInsufficientStockError(
+                product_id=product_id,
+                requested_quantity=quantity_delta,
+                available_quantity=available_quantity,
             )
 
-        txn.set(transaction_ref, transaction_doc)
+        new_quantity = available_quantity - quantity_delta
+        await product_ref.update(
+            {
+                "quantity_on_hand": new_quantity,
+                "updated_at": created_at,
+            }
+        )
+        inventory_updates.append(
+            {
+                "product_id": product_id,
+                "new_quantity_on_hand": new_quantity,
+            }
+        )
 
-        for adjustment_id, adjustment_doc in adjustment_docs:
-            txn.set(
-                db.collection(COL_ADJUSTMENTS).document(adjustment_id),
-                adjustment_doc,
-            )
+    await transaction_ref.set(transaction_doc)
 
-        if customer_summary_update is not None:
-            customer_id = customer_summary_update["customer_id"]
-            customer_ref = db.collection(COL_CUSTOMERS).document(customer_id)
-            customer_snapshot: DocumentSnapshot = await customer_ref.get(transaction=txn)
-            if not customer_snapshot.exists:
-                raise BillingCommitCustomerNotFoundError(customer_id)
+    for adjustment_id, adjustment_doc in adjustment_docs:
+        await db.collection(COL_ADJUSTMENTS).document(adjustment_id).set(adjustment_doc)
 
-            customer_doc = customer_snapshot.to_dict() or {}
-            if customer_doc.get("store_id") != store_id:
-                raise BillingCommitCustomerNotFoundError(customer_id)
+    if customer_summary_update is not None:
+        customer_id = customer_summary_update["customer_id"]
+        customer_ref = db.collection(COL_CUSTOMERS).document(customer_id)
+        customer_snapshot: DocumentSnapshot = await customer_ref.get()
+        if not customer_snapshot.exists:
+            raise BillingCommitCustomerNotFoundError(customer_id)
 
-            current_total_spend = float(customer_doc.get("total_spend", 0.0))
-            current_visit_count = int(customer_doc.get("visit_count", 0))
-            sale_amount = float(customer_summary_update["sale_amount"])
+        customer_doc = customer_snapshot.to_dict() or {}
+        if customer_doc.get("store_id") != store_id:
+            raise BillingCommitCustomerNotFoundError(customer_id)
 
-            txn.update(
-                customer_ref,
-                {
-                    "total_spend": round(current_total_spend + sale_amount, 2),
-                    "visit_count": current_visit_count + 1,
-                    "last_purchase_at": customer_summary_update["sale_timestamp"],
-                    "updated_at": created_at,
-                },
-            )
+        current_total_spend = float(customer_doc.get("total_spend", 0.0))
+        current_visit_count = int(customer_doc.get("visit_count", 0))
+        sale_amount = float(customer_summary_update["sale_amount"])
 
-        response_snapshot = {
-            "idempotent_replay": False,
-            "transaction": response_transaction,
-            "inventory_updates": inventory_updates,
-        }
-        idempotency_doc = {
-            "idempotency_record_id": idempotency_doc_id,
-            "store_id": store_id,
-            "idempotency_key": idempotency_key,
-            "request_hash": request_hash,
-            "transaction_id": transaction_id,
-            "result_status": result_status,
-            "response_snapshot": response_snapshot,
-            "created_at": created_at,
-            "last_seen_at": created_at,
-        }
-        txn.set(idempotency_ref, idempotency_doc)
-        return response_snapshot
+        await customer_ref.update(
+            {
+                "total_spend": round(current_total_spend + sale_amount, 2),
+                "visit_count": current_visit_count + 1,
+                "last_purchase_at": customer_summary_update["sale_timestamp"],
+                "updated_at": created_at,
+            }
+        )
 
-    response_snapshot = await _apply(transaction)
+    response_snapshot = {
+        "idempotent_replay": False,
+        "transaction": response_transaction,
+        "inventory_updates": inventory_updates,
+    }
+    idempotency_doc = {
+        "idempotency_record_id": idempotency_doc_id,
+        "store_id": store_id,
+        "idempotency_key": idempotency_key,
+        "request_hash": request_hash,
+        "transaction_id": transaction_id,
+        "result_status": result_status,
+        "response_snapshot": response_snapshot,
+        "created_at": created_at,
+        "last_seen_at": created_at,
+    }
+    await idempotency_ref.set(idempotency_doc)
     logger.info(
         "Billing transaction committed",
         extra={
