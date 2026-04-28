@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth, credentials
-from fastapi import Depends, Header
+from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.common.config import get_settings
@@ -50,16 +50,20 @@ def _init_firebase() -> None:
         return
 
     if not firebase_admin._apps:
-        cred = credentials.Certificate(
-            {
-                "type": "service_account",
-                "project_id": settings.firebase_project_id,
-                "client_email": settings.firebase_client_email,
-                "private_key": settings.firebase_private_key.replace("\\n", "\n"),
-                "token_uri": "https://oauth2.googleapis.com/token",
-            }
-        )
-        firebase_admin.initialize_app(cred)
+        if settings.firebase_client_email and settings.firebase_private_key:
+            cred = credentials.Certificate(
+                {
+                    "type": "service_account",
+                    "project_id": settings.firebase_project_id,
+                    "client_email": settings.firebase_client_email,
+                    "private_key": settings.firebase_private_key.replace("\\n", "\n"),
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                }
+            )
+            firebase_admin.initialize_app(cred)
+        else:
+            # On Cloud Run, prefer Application Default Credentials from the attached service account.
+            firebase_admin.initialize_app(options={"projectId": settings.firebase_project_id})
 
     _firebase_initialised = True
 
@@ -128,7 +132,7 @@ async def require_auth(
             return AuthenticatedUser(
                 user_id="dev_user_001",
                 role="admin",
-                store_id="store_001",
+                store_id="Demo_Shop",
                 email="dev@stocklytics.local",
             )
         raise UnauthorizedError(

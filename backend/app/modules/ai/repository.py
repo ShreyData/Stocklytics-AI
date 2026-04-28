@@ -478,6 +478,65 @@ async def get_analytics_context(
     }
 
 
+async def vector_search_products(
+    store_id: str,
+    query_embedding: list[float],
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """
+    Retrieve the top-K semantically relevant products for a query using BigQuery VECTOR_SEARCH.
+
+    The embedding values are inlined into the SQL literal because BigQuery does not
+    support parameterized ARRAY<FLOAT64> in the VECTOR_SEARCH sub-select context.
+    Float values from our own embedding model carry no injection risk.
+
+    Returns an empty list on any failure — the caller handles degraded context gracefully.
+
+    We intentionally force brute-force mode here so RAG still works before a
+    dedicated BigQuery vector index has been created in production.
+    """
+    settings = get_settings()
+    project = settings.bigquery_project_id
+    mart = settings.bigquery_dataset_mart
+    if not project or not query_embedding:
+        return []
+
+    bq = _get_bq()
+    # Inline float literals for VECTOR_SEARCH compatibility
+    vector_literal = ", ".join(repr(float(v)) for v in query_embedding)
+
+    sql = f"""
+        SELECT
+            base.product_id,
+            base.product_name,
+            base.category,
+            base.embedding_text,
+            distance
+        FROM VECTOR_SEARCH(
+            (
+                SELECT product_id, product_name, category, embedding_text, embedding
+                FROM `{project}.{mart}.product_embeddings`
+                WHERE store_id = '{store_id}'
+            ),
+            'embedding',
+            (SELECT [{vector_literal}] AS embedding),
+            top_k => {int(top_k)},
+            distance_type => 'COSINE',
+            options => '{{"use_brute_force": true}}'
+        )
+        ORDER BY distance ASC
+    """
+    try:
+        return await _run_bigquery(bq, sql, [])
+    except Exception as exc:
+        logger.warning(
+            "VECTOR_SEARCH query failed; returning empty RAG results",
+            exc_info=exc,
+            extra={"store_id": store_id},
+        )
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Chat session persistence
 # ---------------------------------------------------------------------------

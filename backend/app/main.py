@@ -24,6 +24,7 @@ from app.common.middleware import RequestIdMiddleware
 
 # Platform routes
 from app.api.platform import router as platform_router
+from app.api.admin import router as admin_router
 
 # Module routes (stub routers – each developer fills these in on their branch)
 from app.modules.inventory.router import router as inventory_router
@@ -71,7 +72,7 @@ def create_app() -> FastAPI:
     # CORS – locked down by default; adjust origins for production deployments.
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"] if settings.is_local else [],
+        allow_origins=["*"] if settings.is_local else settings.cors_allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -79,6 +80,7 @@ def create_app() -> FastAPI:
 
     # ---- Platform routes (no module prefix) ----
     application.include_router(platform_router, prefix="/api/v1")
+    application.include_router(admin_router, prefix="/api/v1")
 
     # ---- Module routes ----
     application.include_router(

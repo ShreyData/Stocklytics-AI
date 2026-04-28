@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud import bigquery, firestore
 
 from app.common.config import get_settings
@@ -37,6 +38,15 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_utc_datetime(value: Any) -> Optional[datetime]:
+    """Normalize Firestore timestamps or datetimes to timezone-aware UTC."""
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class AnalyticsRepository:
@@ -154,29 +164,70 @@ class AnalyticsRepository:
         start_of_day = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = start_of_day + timedelta(days=1)
 
-        transactions_query = self.db.collection("transactions").where("store_id", "==", store_id)
-        products_query = self.db.collection("products").where("store_id", "==", store_id)
-        alerts_query = self.db.collection("alerts").where("store_id", "==", store_id)
+        transactions_query = (
+            self.db.collection("transactions")
+            .where("store_id", "==", store_id)
+            .where("sale_timestamp", ">=", start_of_day)
+            .where("sale_timestamp", "<", end_of_day)
+        )
+        active_alerts_query = (
+            self.db.collection("alerts")
+            .where("store_id", "==", store_id)
+            .where("status", "==", "ACTIVE")
+        )
+        low_stock_alerts_query = (
+            self.db.collection("alerts")
+            .where("store_id", "==", store_id)
+            .where("status", "==", "ACTIVE")
+            .where("alert_type", "==", "LOW_STOCK")
+        )
 
-        all_transaction_docs = [doc async for doc in transactions_query.stream()]
-        product_docs = [doc async for doc in products_query.stream()]
-        alert_docs = [doc async for doc in alerts_query.stream()]
+        try:
+            transaction_docs = [doc async for doc in transactions_query.stream()]
+        except FailedPrecondition:
+            logger.warning(
+                "Missing Firestore composite index for live dashboard transactions query; "
+                "falling back to store-only scan.",
+                extra={"store_id": store_id},
+            )
+            fallback_transactions_query = self.db.collection("transactions").where("store_id", "==", store_id)
+            all_transaction_docs = [doc async for doc in fallback_transactions_query.stream()]
+            transaction_docs = []
+            for doc in all_transaction_docs:
+                txn = doc.to_dict() or {}
+                sale_dt = _coerce_utc_datetime(txn.get("sale_timestamp"))
+                if sale_dt is None:
+                    continue
+                if start_of_day <= sale_dt < end_of_day:
+                    transaction_docs.append(doc)
 
-        transaction_docs = []
-        for doc in all_transaction_docs:
-            txn = doc.to_dict() or {}
-            sale_timestamp = txn.get("sale_timestamp")
-            if not isinstance(sale_timestamp, datetime):
-                continue
-            sale_dt = sale_timestamp.astimezone(timezone.utc)
-            if start_of_day <= sale_dt < end_of_day:
-                transaction_docs.append(doc)
+        try:
+            active_alert_docs = [doc async for doc in active_alerts_query.stream()]
+        except FailedPrecondition:
+            logger.warning(
+                "Missing Firestore composite index for live dashboard active alerts query; "
+                "falling back to store-only scan.",
+                extra={"store_id": store_id},
+            )
+            fallback_alerts_query = self.db.collection("alerts").where("store_id", "==", store_id)
+            all_alert_docs = [doc async for doc in fallback_alerts_query.stream()]
+            active_alert_docs = [
+                doc for doc in all_alert_docs if (doc.to_dict() or {}).get("status") == "ACTIVE"
+            ]
 
-        active_alert_docs = []
-        for doc in alert_docs:
-            alert = doc.to_dict() or {}
-            if alert.get("status") == "ACTIVE":
-                active_alert_docs.append(doc)
+        try:
+            low_stock_alert_docs = [doc async for doc in low_stock_alerts_query.stream()]
+        except FailedPrecondition:
+            logger.warning(
+                "Missing Firestore composite index for live dashboard low stock alerts query; "
+                "falling back to active-alert scan.",
+                extra={"store_id": store_id},
+            )
+            low_stock_alert_docs = [
+                doc
+                for doc in active_alert_docs
+                if (doc.to_dict() or {}).get("alert_type") == "LOW_STOCK"
+            ]
 
         today_sales = 0.0
         product_units_sold: dict[str, int] = defaultdict(int)
@@ -193,18 +244,6 @@ class AnalyticsRepository:
                 if item.get("product_name"):
                     product_name_by_id[product_id] = str(item["product_name"])
 
-        low_stock_count = 0
-        for doc in product_docs:
-            product = doc.to_dict() or {}
-            if product.get("status") == "INACTIVE":
-                continue
-            product_id = str(product.get("product_id") or doc.id)
-            product_name_by_id.setdefault(product_id, str(product.get("name") or product_id))
-            quantity_on_hand = _safe_int(product.get("quantity_on_hand", 0))
-            reorder_threshold = _safe_int(product.get("reorder_threshold", 0))
-            if quantity_on_hand <= reorder_threshold:
-                low_stock_count += 1
-
         top_selling_product: Optional[str] = None
         if product_units_sold:
             top_product_id = max(
@@ -217,7 +256,7 @@ class AnalyticsRepository:
             "today_sales": round(today_sales, 2),
             "today_transactions": len(transaction_docs),
             "active_alert_count": len(active_alert_docs),
-            "low_stock_count": low_stock_count,
+            "low_stock_count": len(low_stock_alert_docs),
             "top_selling_product": top_selling_product,
         }
 
