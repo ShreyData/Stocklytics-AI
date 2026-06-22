@@ -173,7 +173,7 @@ function LoginScreen() {
                         placeholder="you@company.com"
                         type="email"
                         autoComplete="email"
-                        className="h-12 rounded-2xl border-white/10 bg-white/[0.05] px-4 text-base text-white placeholder:text-white/35"
+                        className="auth-input h-12 rounded-2xl border-white/10 bg-white/[0.05] px-4 text-base text-white placeholder:text-white/35"
                       />
                     </div>
                     <div className="space-y-2">
@@ -184,7 +184,7 @@ function LoginScreen() {
                         placeholder="Enter your password"
                         type="password"
                         autoComplete="current-password"
-                        className="h-12 rounded-2xl border-white/10 bg-white/[0.05] px-4 text-base text-white placeholder:text-white/35"
+                        className="auth-input h-12 rounded-2xl border-white/10 bg-white/[0.05] px-4 text-base text-white placeholder:text-white/35"
                       />
                     </div>
                   </div>
